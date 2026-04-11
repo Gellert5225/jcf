@@ -1,0 +1,5 @@
+.vscode
+/jcf
+/with_arm
+*.png
+__pycache__
