@@ -3,3 +3,7 @@
 /with_arm
 *.png
 __pycache__
+*.log
+*.pt
+*.npz
+.venv

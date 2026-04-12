@@ -27,10 +27,10 @@ import traceback
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-B3D_ROOT = "./with_arm/training/With_Arm"
+B3D_ROOT = "./with_arm/training"
 OUTPUT_ROOT = "./jcf/training"
-WINDOW_DURATION = 10.0  # seconds of walking to analyze
-BUFFER = 0.5            # padding for filter edge effects
+WINDOW_DURATION = 2.0   # seconds — roughly one gait cycle
+BUFFER = 0.3            # padding for filter edge effects
 
 # ─── XML Template (from JCF_singleFile.py) ───────────────────────────────────
 
@@ -93,13 +93,43 @@ ANALYZE_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8" ?>
 
 # ─── Step 1: Scan b3d for best walking window ────────────────────────────────
 
-def scan_b3d_for_walking(b3d_path, window_duration=10.0):
+def _find_heel_strikes(vy, bw):
+    """Detect heel strikes: frames where per-foot GRF rises from ~0
+    (< 2% BW, i.e. foot in swing) to loading (>= 10% BW).
+    Returns list of frame indices at the onset of loading."""
+    off_thresh = 0.02 * bw   # must be essentially 0 during swing
+    on_thresh = 0.10 * bw    # beginning of loading response
+    strikes = []
+    was_off = vy[0] < off_thresh
+    for i in range(1, len(vy)):
+        if was_off and vy[i] >= on_thresh:
+            strikes.append(i)
+            was_off = False
+        elif vy[i] < off_thresh:
+            was_off = True
+    return strikes
+
+
+MIN_WINDOW_DURATION = 0.3  # shortest usable window (seconds)
+
+
+def scan_b3d_for_walking(b3d_path, window_duration=2.0):
     """
-    Scan a b3d file directly with nimblephysics to find the best contiguous
-    walking window. Returns (trial, start_frame, num_frames, mass_kg) or None.
+    Scan a b3d file to find the best walking window.
     
-    This avoids converting the entire b3d file — we only need to read
-    lightweight header + GRF from candidate trials.
+    Strategy: detect heel strikes (per-foot GRF rising from ~0 to loading)
+    and anchor windows at those onsets. This captures the loading response
+    phase where knee JCF is highest.
+    
+    Adaptive window sizing: tries window_duration first, then falls back
+    to shorter durations (down to MIN_WINDOW_DURATION) if no runs are
+    long enough (e.g. single-step force plate trials).
+    
+    Window constraints:
+      - Per-foot GRF must not exceed 1.7 BW (walking, not running)
+      - Heel strikes start from ~0 (< 2% BW)
+    
+    Returns (trial, start_frame, num_frames, mass_kg) or None.
     """
     import nimblephysics as nimble
     
@@ -109,24 +139,29 @@ def scan_b3d_for_walking(b3d_path, window_duration=10.0):
         return None
     BW = mass_kg * 9.81
     
-    best = None  # (score, trial, start_frame, num_frames)
+    # Identify which contact body indices are feet (calcn_r, calcn_l)
+    contact_bodies = subject.getGroundForceBodies()
+    foot_indices = [i for i, b in enumerate(contact_bodies) if 'calcn' in b]
+    if len(foot_indices) < 2:
+        return None
+    
+    # Collect all valid GRF runs across all trials (with per-foot data)
+    all_runs = []  # (trial, run_start, run_len, dt, vy_r, vy_l)
     
     for trial in range(subject.getNumTrials()):
         trial_len = subject.getTrialLength(trial)
         trial_passes = subject.getTrialNumProcessingPasses(trial)
-        if trial_passes < 2 or trial_len < 50:
+        if trial_passes < 2 or trial_len < 10:
             continue
         
         dt = subject.getTrialTimestep(trial)
-        window_frames = int(window_duration / dt)
-        if window_frames > trial_len:
-            continue
+        min_frames = max(10, int(MIN_WINDOW_DURATION / dt))
         
         # Get missing GRF flags (cheap — header only)
         missing = subject.getMissingGRF(trial)
         valid = [m == nimble.biomechanics.MissingGRFReason.notMissingGRF for m in missing]
         
-        # Find longest contiguous valid run
+        # Find contiguous valid GRF runs
         runs = []
         run_start = None
         for i, v in enumerate(valid):
@@ -138,51 +173,115 @@ def scan_b3d_for_walking(b3d_path, window_duration=10.0):
         if run_start is not None:
             runs.append((run_start, len(valid) - run_start))
         
-        # Only consider runs long enough for our window
-        for run_start, run_len in runs:
-            if run_len < window_frames:
+        for rs, rl in runs:
+            if rl < min_frames:
                 continue
             
-            # Read a small sample from middle of the run to check GRF magnitude
-            mid = run_start + run_len // 2
-            sample_start = max(run_start, mid - 25)
-            sample_n = min(50, run_len)
+            # Read GRF for the entire valid run
             try:
-                frames = subject.readFrames(trial, sample_start, sample_n,
+                frames = subject.readFrames(trial, rs, rl,
                                             includeSensorData=False,
                                             includeProcessingPasses=True)
             except Exception:
                 continue
             
-            # Check vertical GRF magnitude and variation
-            vy_vals = []
-            for f in frames:
+            # Extract per-foot vertical GRF (only calcn_r, calcn_l)
+            vy_r = np.zeros(rl)
+            vy_l = np.zeros(rl)
+            for fi, f in enumerate(frames):
                 if len(f.processingPasses) < 1:
                     continue
                 fp = f.processingPasses[-1]
                 grf = np.array(fp.groundContactForce)
-                # Sum vertical component from all contact bodies (index 1 of each 3-vec)
-                total_vy = sum(grf[j*3 + 1] for j in range(len(grf) // 3))
-                vy_vals.append(total_vy)
+                n_contacts = len(grf) // 3
+                for idx in foot_indices:
+                    if idx < n_contacts:
+                        vy = grf[idx * 3 + 1]
+                        body_name = contact_bodies[idx]
+                        if '_r' in body_name:
+                            vy_r[fi] = vy
+                        else:
+                            vy_l[fi] = vy
             
-            if len(vy_vals) < 10:
-                continue
-            vy_arr = np.array(vy_vals)
-            mean_vy = np.mean(vy_arr)
-            std_vy = np.std(vy_arr)
-            
-            # Walking criteria: mean GRF near BW, decent variation
-            if mean_vy < 0.3 * BW:
-                continue
-            score = std_vy / BW + 0.01 * (run_len / trial_len)  # prefer longer runs
-            
-            # Pick start of the contiguous valid run (use as much as we can)
-            sf = run_start
-            nf = min(run_len, window_frames)
-            
-            if best is None or score > best[0]:
-                best = (score, trial, sf, nf)
+            all_runs.append((trial, rs, rl, dt, vy_r, vy_l))
     
+    if not all_runs:
+        return None
+    
+    # Determine effective window size: use requested duration if runs
+    # are long enough, otherwise use the longest available run
+    max_run_len = max(rl for _, _, rl, _, _, _ in all_runs)
+    dt0 = all_runs[0][3]  # use first trial's dt as reference
+    desired_frames = int(window_duration / dt0)
+    
+    if max_run_len >= desired_frames:
+        window_frames = desired_frames
+    else:
+        # Adaptive: use the longest available run (but at least MIN_WINDOW)
+        window_frames = max_run_len
+        if window_frames * dt0 < MIN_WINDOW_DURATION:
+            return None
+    
+    # Score windows across all collected runs
+    best_strike = None
+    best_fallback = None
+    
+    for trial, rs, rl, dt, vy_r, vy_l in all_runs:
+        wf = min(window_frames, rl)  # can't exceed this run's length
+        if wf * dt < MIN_WINDOW_DURATION:
+            continue
+        
+        # Detect heel strikes for each foot
+        strikes_r = _find_heel_strikes(vy_r, BW)
+        strikes_l = _find_heel_strikes(vy_l, BW)
+        all_strikes = sorted(strikes_r + strikes_l)
+        
+        def _score_window(w_start, w_end):
+            """Score a window by walking quality.
+            Returns None for invalid windows (too low GRF, or
+            per-foot GRF exceeds 1.7 BW — not normal walking)."""
+            r_win = vy_r[w_start:w_end]
+            l_win = vy_l[w_start:w_end]
+            foot_total = r_win + l_win
+            mean_total = np.mean(foot_total)
+            if mean_total < 0.3 * BW:
+                return None
+            # Reject if any single foot GRF exceeds 1.7 BW (running/artifact)
+            peak_r = np.max(r_win)
+            peak_l = np.max(l_win)
+            if peak_r > 1.7 * BW or peak_l > 1.7 * BW:
+                return None
+            peak_single = max(peak_r, peak_l)
+            peak_score = peak_single / BW
+            var_score = (np.std(r_win) + np.std(l_win)) / (2 * BW)
+            n_strikes = sum(1 for s in all_strikes if w_start <= s < w_end)
+            strike_score = min(n_strikes / 4.0, 1.0)
+            return 1.0 * peak_score + 1.0 * var_score + 0.5 * strike_score
+        
+        # --- Heel-strike-anchored windows (primary) ---
+        for hs in all_strikes:
+            w_start = max(0, hs - max(1, int(0.02 / dt)))
+            if w_start + wf > rl:
+                continue
+            score = _score_window(w_start, w_start + wf)
+            if score is None:
+                continue
+            abs_start = rs + w_start
+            if best_strike is None or score > best_strike[0]:
+                best_strike = (score, trial, abs_start, wf)
+        
+        # --- Sliding windows (fallback) ---
+        step = max(1, wf // 4)
+        for w_start in range(0, rl - wf + 1, step):
+            score = _score_window(w_start, w_start + wf)
+            if score is None:
+                continue
+            abs_start = rs + w_start
+            if best_fallback is None or score > best_fallback[0]:
+                best_fallback = (score, trial, abs_start, wf)
+    
+    # Prefer heel-strike-anchored window; use fallback only if none found
+    best = best_strike if best_strike is not None else best_fallback
     if best is None:
         return None
     
@@ -300,7 +399,9 @@ def main():
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
     # Filter to specific datasets (set to None to process all)
-    DATASETS_TO_PROCESS = ["Moore2015_Formatted_With_Arm"]
+    DATASETS_TO_PROCESS = ["Moore2015_Formatted_With_Arm", "Tiziana2019_Formatted_With_Arm"]
+    # Filter to specific subjects (set to None to process all in dataset)
+    SUBJECTS_TO_PROCESS = None
 
     # Find all b3d files
     b3d_files = []
@@ -311,6 +412,8 @@ def main():
         if DATASETS_TO_PROCESS is not None and dataset not in DATASETS_TO_PROCESS:
             continue
         for subject in sorted(os.listdir(dataset_path)):
+            if SUBJECTS_TO_PROCESS is not None and subject not in SUBJECTS_TO_PROCESS:
+                continue
             subj_path = os.path.join(dataset_path, subject)
             b3d_list = glob.glob(os.path.join(subj_path, "*.b3d"))
             if b3d_list:
@@ -322,11 +425,24 @@ def main():
 
     results = {"success": [], "scan_fail": [], "convert_fail": [], "jcf_fail": [], "error": []}
 
+    # Short dataset prefix to avoid macOS case-insensitive collisions
+    DATASET_PREFIX = {
+        "Moore2015_Formatted_With_Arm": "moore",
+        "Tiziana2019_Formatted_With_Arm": "tiziana",
+        "Carter2023_Formatted_With_Arm": "carter",
+        "Falisse2017_Formatted_With_Arm": "falisse",
+        "Fregly2012_Formatted_With_Arm": "fregly",
+        "Hammer2013_Formatted_With_Arm": "hammer",
+        "Han2023_Formatted_With_Arm": "han",
+    }
+
     for idx, (dataset_name, subject_name, b3d_path) in enumerate(b3d_files):
+        prefix = DATASET_PREFIX.get(dataset_name, dataset_name.split('_')[0].lower())
+        output_name = f"{prefix}_{subject_name}"
         tag = f"[{idx+1}/{len(b3d_files)}] {dataset_name}/{subject_name}"
 
         # Check if already processed
-        subj_output = os.path.join(OUTPUT_ROOT, subject_name)
+        subj_output = os.path.join(OUTPUT_ROOT, output_name)
         jcf_output = os.path.join(subj_output, 'jcf_output')
         jcf_sto = os.path.join(jcf_output, "BatchJCF_JointReaction_ReactionLoads.sto")
         if os.path.exists(jcf_sto):
@@ -345,23 +461,23 @@ def main():
                 results["scan_fail"].append(subject_name)
                 continue
             trial, start_frame, num_frames, mass_kg = scan
-            dt_est = WINDOW_DURATION / num_frames if num_frames > 0 else 0.01
             print(f"  Found: trial {trial}, frames {start_frame}-{start_frame+num_frames} "
-                  f"({num_frames * dt_est:.1f}s), mass={mass_kg:.1f}kg")
+                  f"({num_frames} frames), mass={mass_kg:.1f}kg")
 
             # Step 2: Convert only the needed slice to OpenSim
-            if not os.path.exists(os.path.join(subj_output, 'scaled_model.osim')):
+            ik_path = os.path.join(subj_output, 'ik_results.mot')
+            if not os.path.exists(ik_path):
                 print(f"  Converting b3d slice...")
                 ok = convert_b3d_slice(b3d_path, OUTPUT_ROOT, trial,
-                                       start_frame, num_frames, subject_name)
-                if not ok:
+                                       start_frame, num_frames, output_name)
+                if not ok or not os.path.exists(ik_path):
+                    print(f"  Conversion produced no IK data (window too short?)")
                     results["convert_fail"].append(subject_name)
                     continue
             else:
                 print(f"  OpenSim files exist, skipping conversion")
 
             # Step 3: Run SO + JR on the converted slice
-            # The converted .mot starts at time 0, so t0/t1 are relative
             meta_path = os.path.join(subj_output, 'metadata.json')
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
@@ -373,9 +489,13 @@ def main():
             # Read the IK file to get actual time range
             ik_path = os.path.join(subj_output, 'ik_results.mot')
             ik_df = pd.read_csv(ik_path, sep='\t', skiprows=6)
-            t0 = ik_df['time'].iloc[0] + BUFFER
-            t1 = ik_df['time'].iloc[-1] - BUFFER
-            if t1 - t0 < 1.0:
+            ik_duration = ik_df['time'].iloc[-1] - ik_df['time'].iloc[0]
+            # Adaptive buffer: use BUFFER for long windows, less for short ones
+            buf = min(BUFFER, ik_duration * 0.15)
+            t0 = ik_df['time'].iloc[0] + buf
+            t1 = ik_df['time'].iloc[-1] - buf
+            min_analysis_time = 0.2  # minimum usable analysis duration
+            if t1 - t0 < min_analysis_time:
                 print(f"  Converted slice too short ({t1-t0:.1f}s)")
                 results["convert_fail"].append(subject_name)
                 continue
