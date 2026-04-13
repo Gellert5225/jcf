@@ -24,6 +24,10 @@ import pandas as pd
 import numpy as np
 import glob
 import traceback
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+NUM_WORKERS = max(1, mp.cpu_count() - 1)  # leave 1 core free
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -393,13 +397,95 @@ def run_jcf(subject_dir, t0, t1):
     return False
 
 
+# ─── Per-subject worker (runs in child process) ─────────────────────────────
+
+DATASET_PREFIX = {
+    "Moore2015_Formatted_With_Arm": "moore",
+    "Tiziana2019_Formatted_With_Arm": "tiziana",
+    "Carter2023_Formatted_With_Arm": "carter",
+    "Falisse2017_Formatted_With_Arm": "falisse",
+    "Fregly2012_Formatted_With_Arm": "fregly",
+    "Hammer2013_Formatted_With_Arm": "hammer",
+    "Han2023_Formatted_With_Arm": "han",
+}
+
+
+def process_one_subject(args):
+    """
+    Process a single subject. Designed to run in a worker process.
+    Returns (output_name, status_key) where status_key is one of:
+        'success', 'skip', 'scan_fail', 'convert_fail', 'jcf_fail', 'error'
+    """
+    dataset_name, subject_name, b3d_path, idx, total = args
+    prefix = DATASET_PREFIX.get(dataset_name, dataset_name.split('_')[0].lower())
+    output_name = f"{prefix}_{subject_name}"
+    tag = f"[{idx+1}/{total}] {dataset_name}/{subject_name}"
+
+    # Check if already processed
+    subj_output = os.path.join(OUTPUT_ROOT, output_name)
+    jcf_output = os.path.join(subj_output, 'jcf_output')
+    jcf_sto = os.path.join(jcf_output, "BatchJCF_JointReaction_ReactionLoads.sto")
+    if os.path.exists(jcf_sto):
+        print(f"{tag}: SKIP (already done)", flush=True)
+        return (output_name, 'skip')
+
+    print(f"\n{tag}: Processing...", flush=True)
+
+    try:
+        # Step 1: Scan b3d for best walking window
+        print(f"  [{output_name}] Scanning b3d...", flush=True)
+        scan = scan_b3d_for_walking(b3d_path, WINDOW_DURATION)
+        if scan is None:
+            print(f"  [{output_name}] No valid walking window", flush=True)
+            return (output_name, 'scan_fail')
+        trial, start_frame, num_frames, mass_kg = scan
+        print(f"  [{output_name}] trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
+              f"mass={mass_kg:.1f}kg", flush=True)
+
+        # Step 2: Convert only the needed slice
+        ik_path = os.path.join(subj_output, 'ik_results.mot')
+        if not os.path.exists(ik_path):
+            print(f"  [{output_name}] Converting b3d slice...", flush=True)
+            ok = convert_b3d_slice(b3d_path, OUTPUT_ROOT, trial,
+                                   start_frame, num_frames, output_name)
+            if not ok or not os.path.exists(ik_path):
+                print(f"  [{output_name}] Conversion failed", flush=True)
+                return (output_name, 'convert_fail')
+        else:
+            print(f"  [{output_name}] OpenSim files exist, skipping conversion", flush=True)
+
+        # Step 3: Run SO + JR
+        ik_df = pd.read_csv(ik_path, sep='\t', skiprows=6)
+        ik_duration = ik_df['time'].iloc[-1] - ik_df['time'].iloc[0]
+        buf = min(BUFFER, ik_duration * 0.15)
+        t0 = ik_df['time'].iloc[0] + buf
+        t1 = ik_df['time'].iloc[-1] - buf
+        if t1 - t0 < 0.2:
+            print(f"  [{output_name}] Slice too short ({t1-t0:.1f}s)", flush=True)
+            return (output_name, 'convert_fail')
+
+        print(f"  [{output_name}] SO+JR [{t0:.2f}, {t1:.2f}]s...", flush=True)
+        ok = run_jcf(subj_output, t0, t1)
+        if ok:
+            print(f"  [{output_name}] SUCCESS", flush=True)
+            return (output_name, 'success')
+        else:
+            print(f"  [{output_name}] JCF output missing", flush=True)
+            return (output_name, 'jcf_fail')
+
+    except Exception as e:
+        print(f"  [{output_name}] ERROR: {e}", flush=True)
+        traceback.print_exc()
+        return (output_name, 'error')
+
+
 # ─── Main batch loop ─────────────────────────────────────────────────────────
 
 def main():
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
     # Filter to specific datasets (set to None to process all)
-    DATASETS_TO_PROCESS = ["Moore2015_Formatted_With_Arm", "Tiziana2019_Formatted_With_Arm"]
+    DATASETS_TO_PROCESS = None
     # Filter to specific subjects (set to None to process all in dataset)
     SUBJECTS_TO_PROCESS = None
 
@@ -419,108 +505,33 @@ def main():
             if b3d_list:
                 b3d_files.append((dataset, subject, b3d_list[0]))
 
-    print(f"Found {len(b3d_files)} subjects to process")
+    total = len(b3d_files)
+    print(f"Found {total} subjects to process")
     print(f"Output: {OUTPUT_ROOT}")
+    print(f"Workers: {NUM_WORKERS}")
     print("=" * 60)
 
-    results = {"success": [], "scan_fail": [], "convert_fail": [], "jcf_fail": [], "error": []}
+    # Build worker args
+    worker_args = [
+        (ds, subj, path, idx, total)
+        for idx, (ds, subj, path) in enumerate(b3d_files)
+    ]
 
-    # Short dataset prefix to avoid macOS case-insensitive collisions
-    DATASET_PREFIX = {
-        "Moore2015_Formatted_With_Arm": "moore",
-        "Tiziana2019_Formatted_With_Arm": "tiziana",
-        "Carter2023_Formatted_With_Arm": "carter",
-        "Falisse2017_Formatted_With_Arm": "falisse",
-        "Fregly2012_Formatted_With_Arm": "fregly",
-        "Hammer2013_Formatted_With_Arm": "hammer",
-        "Han2023_Formatted_With_Arm": "han",
-    }
+    results = {"success": [], "skip": [], "scan_fail": [], "convert_fail": [],
+               "jcf_fail": [], "error": []}
 
-    for idx, (dataset_name, subject_name, b3d_path) in enumerate(b3d_files):
-        prefix = DATASET_PREFIX.get(dataset_name, dataset_name.split('_')[0].lower())
-        output_name = f"{prefix}_{subject_name}"
-        tag = f"[{idx+1}/{len(b3d_files)}] {dataset_name}/{subject_name}"
-
-        # Check if already processed
-        subj_output = os.path.join(OUTPUT_ROOT, output_name)
-        jcf_output = os.path.join(subj_output, 'jcf_output')
-        jcf_sto = os.path.join(jcf_output, "BatchJCF_JointReaction_ReactionLoads.sto")
-        if os.path.exists(jcf_sto):
-            print(f"{tag}: SKIP (already done)")
-            results["success"].append(subject_name)
-            continue
-
-        print(f"\n{tag}: Processing...")
-
-        try:
-            # Step 1: Scan b3d for best walking window (fast, no conversion)
-            print(f"  Scanning b3d for walking window...")
-            scan = scan_b3d_for_walking(b3d_path, WINDOW_DURATION)
-            if scan is None:
-                print(f"  No valid walking window found in b3d")
-                results["scan_fail"].append(subject_name)
-                continue
-            trial, start_frame, num_frames, mass_kg = scan
-            print(f"  Found: trial {trial}, frames {start_frame}-{start_frame+num_frames} "
-                  f"({num_frames} frames), mass={mass_kg:.1f}kg")
-
-            # Step 2: Convert only the needed slice to OpenSim
-            ik_path = os.path.join(subj_output, 'ik_results.mot')
-            if not os.path.exists(ik_path):
-                print(f"  Converting b3d slice...")
-                ok = convert_b3d_slice(b3d_path, OUTPUT_ROOT, trial,
-                                       start_frame, num_frames, output_name)
-                if not ok or not os.path.exists(ik_path):
-                    print(f"  Conversion produced no IK data (window too short?)")
-                    results["convert_fail"].append(subject_name)
-                    continue
-            else:
-                print(f"  OpenSim files exist, skipping conversion")
-
-            # Step 3: Run SO + JR on the converted slice
-            meta_path = os.path.join(subj_output, 'metadata.json')
-            if os.path.exists(meta_path):
-                with open(meta_path) as f:
-                    meta = json.load(f)
-                n_valid = meta.get('n_valid_frames', 0)
-            else:
-                n_valid = num_frames
-            
-            # Read the IK file to get actual time range
-            ik_path = os.path.join(subj_output, 'ik_results.mot')
-            ik_df = pd.read_csv(ik_path, sep='\t', skiprows=6)
-            ik_duration = ik_df['time'].iloc[-1] - ik_df['time'].iloc[0]
-            # Adaptive buffer: use BUFFER for long windows, less for short ones
-            buf = min(BUFFER, ik_duration * 0.15)
-            t0 = ik_df['time'].iloc[0] + buf
-            t1 = ik_df['time'].iloc[-1] - buf
-            min_analysis_time = 0.2  # minimum usable analysis duration
-            if t1 - t0 < min_analysis_time:
-                print(f"  Converted slice too short ({t1-t0:.1f}s)")
-                results["convert_fail"].append(subject_name)
-                continue
-            print(f"  Running SO + JointReaction on [{t0:.2f}, {t1:.2f}]s...")
-            sys.stdout.flush()
-
-            ok = run_jcf(subj_output, t0, t1)
-            if ok:
-                print(f"  SUCCESS")
-                results["success"].append(subject_name)
-            else:
-                print(f"  JCF output missing")
-                results["jcf_fail"].append(subject_name)
-
-        except Exception as e:
-            print(f"  ERROR: {e}")
-            traceback.print_exc()
-            results["error"].append(subject_name)
-
-        sys.stdout.flush()
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS,
+                             mp_context=mp.get_context('spawn')) as pool:
+        futures = {pool.submit(process_one_subject, a): a for a in worker_args}
+        for future in as_completed(futures):
+            output_name, status = future.result()
+            results[status].append(output_name)
 
     # Summary
     print("\n" + "=" * 60)
     print("BATCH PROCESSING SUMMARY")
     print(f"  Success:        {len(results['success'])}")
+    print(f"  Skipped:        {len(results['skip'])}")
     print(f"  Scan fail:      {len(results['scan_fail'])}")
     print(f"  Convert fail:   {len(results['convert_fail'])}")
     print(f"  JCF fail:       {len(results['jcf_fail'])}")
