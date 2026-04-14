@@ -25,9 +25,6 @@ import numpy as np
 import glob
 import traceback
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-NUM_WORKERS = max(1, mp.cpu_count() - 1)  # leave 1 core free
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -508,7 +505,6 @@ def main():
     total = len(b3d_files)
     print(f"Found {total} subjects to process")
     print(f"Output: {OUTPUT_ROOT}")
-    print(f"Workers: {NUM_WORKERS}")
     print("=" * 60)
 
     # Build worker args
@@ -520,12 +516,9 @@ def main():
     results = {"success": [], "skip": [], "scan_fail": [], "convert_fail": [],
                "jcf_fail": [], "error": []}
 
-    with ProcessPoolExecutor(max_workers=NUM_WORKERS,
-                             mp_context=mp.get_context('spawn')) as pool:
-        futures = {pool.submit(process_one_subject, a): a for a in worker_args}
-        for future in as_completed(futures):
-            output_name, status = future.result()
-            results[status].append(output_name)
+    for a in worker_args:
+        output_name, status = process_one_subject(a)
+        results[status].append(output_name)
 
     # Summary
     print("\n" + "=" * 60)
