@@ -1,9 +1,9 @@
 """
-Test the trained 1D CNN on held-out subjects in jcf/testing/.
+Test the trained MLP on held-out subjects in jcf/testing/.
 Produces per-subject metrics and a plot comparing predicted vs ground truth JCF.
 
 Usage:
-    conda run -n jcf python test_cnn.py
+    conda run -n jcf python test_mlp.py
 """
 
 import os
@@ -12,12 +12,12 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# Reuse data loading and model from train_cnn
-from train_cnn import load_subject, JCF_CNN
+from train_cnn import load_subject
+from train_mlp import JCF_MLP
 
 TEST_ROOT = "./jcf/testing/walking"
-MODEL_PATH = "./jcf/training/walking/best_model.pt"
-DEVICE = "cpu"
+MODEL_PATH = "./jcf/training/walking/best_model_mlp.pt"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def test():
@@ -26,10 +26,11 @@ def test():
     n_features = checkpoint['n_features']
     window_size = checkpoint['window_size']
 
-    model = JCF_CNN(n_features=n_features, n_outputs=3).to(DEVICE)
+    model = JCF_MLP(n_features=n_features, window_size=window_size,
+                    n_outputs=3).to(DEVICE)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    print(f"Loaded model from epoch {checkpoint['epoch']+1} "
+    print(f"Loaded MLP from epoch {checkpoint['epoch']+1} "
           f"(val_loss={checkpoint['val_loss']:.6f})")
     print(f"Window size: {window_size}, Features: {n_features}, Device: {DEVICE}")
 
@@ -60,7 +61,6 @@ def test():
         T = len(labels)
         BW = mass * 9.81
 
-        # Predict full sequence using overlapping windows, average predictions
         pred_sum = np.zeros((T, 3))
         pred_count = np.zeros(T)
 
@@ -73,7 +73,6 @@ def test():
                 pred_sum[start:end] += out[0].cpu().numpy()
                 pred_count[start:end] += 1
 
-        # Handle edges (frames with fewer overlapping windows)
         valid = pred_count > 0
         preds = np.zeros_like(pred_sum)
         preds[valid] = pred_sum[valid] / pred_count[valid, None]
@@ -83,13 +82,11 @@ def test():
         mae = np.mean(np.abs(errors), axis=0)
         rmse = np.sqrt(np.mean(errors**2, axis=0))
 
-        # Resultant force
         gt_resultant = np.sqrt(np.sum(labels[valid]**2, axis=1))
         pred_resultant = np.sqrt(np.sum(preds[valid]**2, axis=1))
         res_mae = np.mean(np.abs(pred_resultant - gt_resultant))
         res_rmse = np.sqrt(np.mean((pred_resultant - gt_resultant)**2))
 
-        # Correlation
         corr_fy = np.corrcoef(preds[valid, 1], labels[valid, 1])[0, 1]
         corr_res = np.corrcoef(pred_resultant, gt_resultant)[0, 1]
 
@@ -127,10 +124,10 @@ def test():
         # Left: Axial component (Fy)
         ax = axes[i, 0]
         ax.plot(time[valid], labels[valid, 1], 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], preds[valid, 1], 'r--', linewidth=1.5, label='Predicted')
+        ax.plot(time[valid], preds[valid, 1], 'r--', linewidth=1.5, label='MLP Predicted')
         ax.set_ylabel('Fy (BW)')
         ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Axial Force (Fy)')
+        ax.set_title(f'{res["name"]} — Axial Force (Fy) [MLP]')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
@@ -139,16 +136,16 @@ def test():
         gt_res = np.sqrt(np.sum(labels[valid]**2, axis=1))
         pred_res = np.sqrt(np.sum(preds[valid]**2, axis=1))
         ax.plot(time[valid], gt_res, 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], pred_res, 'r--', linewidth=1.5, label='Predicted')
+        ax.plot(time[valid], pred_res, 'r--', linewidth=1.5, label='MLP Predicted')
         ax.axhspan(2.5, 3.5, alpha=0.1, color='green', label='Expected peak range')
         ax.set_ylabel('Resultant JCF (BW)')
         ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Resultant JCF')
+        ax.set_title(f'{res["name"]} — Resultant JCF [MLP]')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    out_path = os.path.join(TEST_ROOT, 'test_results.png')
+    out_path = os.path.join(TEST_ROOT, 'test_results_mlp.png')
     plt.savefig(out_path, dpi=150)
     print(f"\nPlot saved to {out_path}")
     plt.close()

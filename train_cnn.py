@@ -38,9 +38,9 @@ DATA_ROOT = "./jcf/training/walking"
 WINDOW_SIZE = 50        # frames per window (0.5s at 100Hz)
 STRIDE = 10             # sliding window stride (0.1s)
 BATCH_SIZE = 64
-EPOCHS = 100
+EPOCHS = 200
 LEARNING_RATE = 1e-3
-DEVICE = "cpu"  # MPS backward pass unstable with Conv1d in PyTorch 2.5
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TRAIN_SPLIT = 0.8       # 80% train, 20% val (by subject)
 
 
@@ -259,7 +259,24 @@ def train():
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=10, factor=0.5
     )
-    criterion = nn.MSELoss()
+    mse_loss = nn.MSELoss()
+
+    def criterion(preds, labels):
+        # 1) Base MSE
+        loss_mse = mse_loss(preds, labels)
+
+        # 2) Gradient loss — penalizes wrong slopes to preserve peak sharpness
+        pred_diff = preds[:, 1:, :] - preds[:, :-1, :]
+        label_diff = labels[:, 1:, :] - labels[:, :-1, :]
+        loss_grad = mse_loss(pred_diff, label_diff)
+
+        # 3) Peak loss — penalizes underestimating per-window peak magnitude
+        #    Use abs values so both positive and negative peaks are captured
+        pred_peak, _ = torch.abs(preds).max(dim=1)   # [batch, 3]
+        label_peak, _ = torch.abs(labels).max(dim=1)  # [batch, 3]
+        loss_peak = mse_loss(pred_peak, label_peak)
+
+        return loss_mse + 0.5 * loss_grad + 0.5 * loss_peak
 
     best_val_loss = float('inf')
 
@@ -290,12 +307,18 @@ def train():
                 labels = labels.to(DEVICE)
 
                 preds = model(inputs)
-                loss = criterion(preds, labels)
+                loss = mse_loss(preds, labels)  # val uses plain MSE for comparability
                 val_loss += loss.item() * inputs.size(0)
 
                 # Fy (axial) MAE in BW
                 fy_err = torch.abs(preds[:, :, 1] - labels[:, :, 1]).mean()
                 val_fy_errors.append(fy_err.item())
+
+                # Peak error tracking
+                pred_peak = torch.abs(preds).max(dim=1)[0]  # [batch, 3]
+                label_peak = torch.abs(labels).max(dim=1)[0]
+                peak_err = (label_peak - pred_peak).mean()
+                val_fy_errors.append(fy_err.item())  # reused list for simplicity
 
         val_loss /= len(val_ds)
         val_fy_mae = np.mean(val_fy_errors)

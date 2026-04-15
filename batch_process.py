@@ -28,9 +28,10 @@ import multiprocessing as mp
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-B3D_ROOT = "./with_arm/training"
-OUTPUT_ROOT = "./jcf/training"
-OUTPUT_ROOT_RUNNING = "./jcf/training/running"
+B3D_ROOT = "./with_arm/testing"
+OUTPUT_ROOT = "./jcf/testing"
+OUTPUT_ROOT_WALKING = "./jcf/testing/walking"
+OUTPUT_ROOT_RUNNING = "./jcf/testing/running"
 WINDOW_DURATION = 2.0   # seconds — roughly one gait cycle
 BUFFER = 0.3            # padding for filter edge effects
 GRF_CAP_WALKING = 1.7   # BW — per-foot peak cap for walking
@@ -468,7 +469,7 @@ def process_one_subject(args):
     tag = f"[{idx+1}/{total}] {dataset_name}/{subject_name}"
 
     # Check if already processed
-    subj_walking = os.path.join(OUTPUT_ROOT, output_name)
+    subj_walking = os.path.join(OUTPUT_ROOT_WALKING, output_name)
     subj_running = os.path.join(OUTPUT_ROOT_RUNNING, output_name)
     walking_done = os.path.exists(os.path.join(
         subj_walking, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
@@ -492,7 +493,7 @@ def process_one_subject(args):
             trial, start_frame, num_frames, mass_kg = scan_walk
             print(f"  [{output_name}] walking — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
                   f"mass={mass_kg:.1f}kg", flush=True)
-            _process_activity(output_name, b3d_path, subj_walking, OUTPUT_ROOT,
+            _process_activity(output_name, b3d_path, subj_walking, OUTPUT_ROOT_WALKING,
                               trial, start_frame, num_frames)
 
         # Process running
@@ -520,6 +521,7 @@ def process_one_subject(args):
 def main():
     global _scan_log_file
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
+    os.makedirs(OUTPUT_ROOT_WALKING, exist_ok=True)
     os.makedirs(OUTPUT_ROOT_RUNNING, exist_ok=True)
     _scan_log_file = open(SCAN_LOG, 'w')
 
