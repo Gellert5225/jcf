@@ -17,7 +17,7 @@ from train_cnn import load_subject, JCF_CNN
 
 TEST_ROOT = "./jcf/testing"
 MODEL_PATH = "./jcf/training/best_model.pt"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cpu"
 
 
 def test():

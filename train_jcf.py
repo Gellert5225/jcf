@@ -155,6 +155,10 @@ def train():
             if resultant.max() > 10.0:
                 print(f"  SKIP {name}: peak JCF {resultant.max():.1f} BW (anomalous)")
                 continue
+            # Skip subjects with suspiciously low JCF (failed SO)
+            if resultant.max() < 1.5:
+                print(f"  SKIP {name}: peak JCF {resultant.max():.2f} BW (SO likely failed)")
+                continue
             all_inputs.append(inputs)
             all_targets.append(targets)
             print(f"  {name}: {len(targets)} frames, "

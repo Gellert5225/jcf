@@ -34,13 +34,13 @@ from sklearn.model_selection import train_test_split
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-DATA_ROOT = "./jcf/training"
+DATA_ROOT = "./jcf/training/walking"
 WINDOW_SIZE = 50        # frames per window (0.5s at 100Hz)
 STRIDE = 10             # sliding window stride (0.1s)
 BATCH_SIZE = 64
 EPOCHS = 100
 LEARNING_RATE = 1e-3
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cpu"  # MPS backward pass unstable with Conv1d in PyTorch 2.5
 TRAIN_SPLIT = 0.8       # 80% train, 20% val (by subject)
 
 
@@ -84,7 +84,10 @@ def load_subject(subject_dir):
 
     # Load GRF (forces only — 6 columns: calcn_r xyz + calcn_l xyz)
     grf = load_mot(grf_path)
-    force_cols = [c for c in grf.columns if '_force_v' in c]
+    force_cols = [c for c in grf.columns
+                  if ('calcn_r' in c or 'calcn_l' in c) and '_force_v' in c]
+    if len(force_cols) != 6:
+        return None
     grf_time = grf['time'].values
     grf_data = grf[force_cols].values / BW  # normalize by BW
 

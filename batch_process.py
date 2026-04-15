@@ -30,8 +30,13 @@ import multiprocessing as mp
 
 B3D_ROOT = "./with_arm/training"
 OUTPUT_ROOT = "./jcf/training"
+OUTPUT_ROOT_RUNNING = "./jcf/training/running"
 WINDOW_DURATION = 2.0   # seconds — roughly one gait cycle
 BUFFER = 0.3            # padding for filter edge effects
+GRF_CAP_WALKING = 1.7   # BW — per-foot peak cap for walking
+GRF_CAP_RUNNING = 3.5   # BW — per-foot peak cap for running
+SCAN_LOG = os.path.join(OUTPUT_ROOT, 'scan_failures.txt')
+_scan_log_file = None
 
 # ─── XML Template (from JCF_singleFile.py) ───────────────────────────────────
 
@@ -114,7 +119,13 @@ def _find_heel_strikes(vy, bw):
 MIN_WINDOW_DURATION = 0.3  # shortest usable window (seconds)
 
 
-def scan_b3d_for_walking(b3d_path, window_duration=2.0):
+def _scan_log(msg):
+    if _scan_log_file is not None:
+        _scan_log_file.write(msg + '\n')
+        _scan_log_file.flush()
+
+
+def scan_b3d_for_walking(b3d_path, window_duration=2.0, grf_cap_bw=GRF_CAP_WALKING):
     """
     Scan a b3d file to find the best walking window.
     
@@ -127,7 +138,7 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
     long enough (e.g. single-step force plate trials).
     
     Window constraints:
-      - Per-foot GRF must not exceed 1.7 BW (walking, not running)
+      - Per-foot GRF must not exceed grf_cap_bw * BW
       - Heel strikes start from ~0 (< 2% BW)
     
     Returns (trial, start_frame, num_frames, mass_kg) or None.
@@ -137,6 +148,7 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
     subject = nimble.biomechanics.SubjectOnDisk(b3d_path)
     mass_kg = subject.getMassKg()
     if mass_kg <= 0:
+        _scan_log(f"{b3d_path}: invalid mass ({mass_kg})")
         return None
     BW = mass_kg * 9.81
     
@@ -144,6 +156,7 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
     contact_bodies = subject.getGroundForceBodies()
     foot_indices = [i for i, b in enumerate(contact_bodies) if 'calcn' in b]
     if len(foot_indices) < 2:
+        _scan_log(f"{b3d_path}: <2 foot contacts (bodies: {list(contact_bodies)})")
         return None
     
     # Collect all valid GRF runs across all trials (with per-foot data)
@@ -207,6 +220,8 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
             all_runs.append((trial, rs, rl, dt, vy_r, vy_l))
     
     if not all_runs:
+        n_trials = subject.getNumTrials()
+        _scan_log(f"{b3d_path}: no valid GRF runs ({n_trials} trials examined)")
         return None
     
     # Determine effective window size: use requested duration if runs
@@ -221,6 +236,7 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
         # Adaptive: use the longest available run (but at least MIN_WINDOW)
         window_frames = max_run_len
         if window_frames * dt0 < MIN_WINDOW_DURATION:
+            _scan_log(f"{b3d_path}: longest run too short ({window_frames * dt0:.2f}s < {MIN_WINDOW_DURATION}s)")
             return None
     
     # Score windows across all collected runs
@@ -247,10 +263,10 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
             mean_total = np.mean(foot_total)
             if mean_total < 0.3 * BW:
                 return None
-            # Reject if any single foot GRF exceeds 1.7 BW (running/artifact)
+            # Reject if any single foot GRF exceeds cap
             peak_r = np.max(r_win)
             peak_l = np.max(l_win)
-            if peak_r > 1.7 * BW or peak_l > 1.7 * BW:
+            if peak_r > grf_cap_bw * BW or peak_l > grf_cap_bw * BW:
                 return None
             peak_single = max(peak_r, peak_l)
             peak_score = peak_single / BW
@@ -284,6 +300,7 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0):
     # Prefer heel-strike-anchored window; use fallback only if none found
     best = best_strike if best_strike is not None else best_fallback
     if best is None:
+        _scan_log(f"{b3d_path}: no window passed quality filter (GRF too low or too high)")
         return None
     
     _, trial, sf, nf = best
@@ -407,6 +424,38 @@ DATASET_PREFIX = {
 }
 
 
+def _process_activity(output_name, b3d_path, subj_output, out_root,
+                      trial, start_frame, num_frames):
+    """Convert b3d slice and run SO+JR for one activity."""
+    ik_path = os.path.join(subj_output, 'ik_results.mot')
+    if not os.path.exists(ik_path):
+        print(f"  [{output_name}] Converting b3d slice...", flush=True)
+        ok = convert_b3d_slice(b3d_path, out_root, trial,
+                               start_frame, num_frames, output_name)
+        if not ok or not os.path.exists(ik_path):
+            print(f"  [{output_name}] Conversion failed", flush=True)
+            return False
+    else:
+        print(f"  [{output_name}] OpenSim files exist, skipping conversion", flush=True)
+
+    ik_df = pd.read_csv(ik_path, sep='\t', skiprows=6)
+    ik_duration = ik_df['time'].iloc[-1] - ik_df['time'].iloc[0]
+    buf = min(BUFFER, ik_duration * 0.15)
+    t0 = ik_df['time'].iloc[0] + buf
+    t1 = ik_df['time'].iloc[-1] - buf
+    if t1 - t0 < 0.2:
+        print(f"  [{output_name}] Slice too short ({t1-t0:.1f}s)", flush=True)
+        return False
+
+    print(f"  [{output_name}] SO+JR [{t0:.2f}, {t1:.2f}]s...", flush=True)
+    ok = run_jcf(subj_output, t0, t1)
+    if ok:
+        print(f"  [{output_name}] SUCCESS", flush=True)
+    else:
+        print(f"  [{output_name}] JCF output missing", flush=True)
+    return ok
+
+
 def process_one_subject(args):
     """
     Process a single subject. Designed to run in a worker process.
@@ -419,56 +468,46 @@ def process_one_subject(args):
     tag = f"[{idx+1}/{total}] {dataset_name}/{subject_name}"
 
     # Check if already processed
-    subj_output = os.path.join(OUTPUT_ROOT, output_name)
-    jcf_output = os.path.join(subj_output, 'jcf_output')
-    jcf_sto = os.path.join(jcf_output, "BatchJCF_JointReaction_ReactionLoads.sto")
-    if os.path.exists(jcf_sto):
-        print(f"{tag}: SKIP (already done)", flush=True)
-        return (output_name, 'skip')
+    subj_walking = os.path.join(OUTPUT_ROOT, output_name)
+    subj_running = os.path.join(OUTPUT_ROOT_RUNNING, output_name)
+    walking_done = os.path.exists(os.path.join(
+        subj_walking, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
+    running_done = os.path.exists(os.path.join(
+        subj_running, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
 
     print(f"\n{tag}: Processing...", flush=True)
 
     try:
-        # Step 1: Scan b3d for best walking window
+        # Step 1: Scan b3d — try walking cap first
         print(f"  [{output_name}] Scanning b3d...", flush=True)
-        scan = scan_b3d_for_walking(b3d_path, WINDOW_DURATION)
-        if scan is None:
-            print(f"  [{output_name}] No valid walking window", flush=True)
+        scan_walk = scan_b3d_for_walking(b3d_path, WINDOW_DURATION, GRF_CAP_WALKING) if not walking_done else None
+        scan_run = scan_b3d_for_walking(b3d_path, WINDOW_DURATION, GRF_CAP_RUNNING) if not running_done else None
+
+        if walking_done and running_done:
+            print(f"  [{output_name}] SKIP (both done)", flush=True)
+            return (output_name, 'skip')
+
+        # Process walking
+        if scan_walk is not None and not walking_done:
+            trial, start_frame, num_frames, mass_kg = scan_walk
+            print(f"  [{output_name}] walking — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
+                  f"mass={mass_kg:.1f}kg", flush=True)
+            _process_activity(output_name, b3d_path, subj_walking, OUTPUT_ROOT,
+                              trial, start_frame, num_frames)
+
+        # Process running
+        if scan_run is not None and not running_done:
+            trial, start_frame, num_frames, mass_kg = scan_run
+            print(f"  [{output_name}] running — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
+                  f"mass={mass_kg:.1f}kg", flush=True)
+            _process_activity(output_name, b3d_path, subj_running, OUTPUT_ROOT_RUNNING,
+                              trial, start_frame, num_frames)
+
+        if scan_walk is None and scan_run is None and not walking_done and not running_done:
+            print(f"  [{output_name}] No valid window", flush=True)
             return (output_name, 'scan_fail')
-        trial, start_frame, num_frames, mass_kg = scan
-        print(f"  [{output_name}] trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
-              f"mass={mass_kg:.1f}kg", flush=True)
 
-        # Step 2: Convert only the needed slice
-        ik_path = os.path.join(subj_output, 'ik_results.mot')
-        if not os.path.exists(ik_path):
-            print(f"  [{output_name}] Converting b3d slice...", flush=True)
-            ok = convert_b3d_slice(b3d_path, OUTPUT_ROOT, trial,
-                                   start_frame, num_frames, output_name)
-            if not ok or not os.path.exists(ik_path):
-                print(f"  [{output_name}] Conversion failed", flush=True)
-                return (output_name, 'convert_fail')
-        else:
-            print(f"  [{output_name}] OpenSim files exist, skipping conversion", flush=True)
-
-        # Step 3: Run SO + JR
-        ik_df = pd.read_csv(ik_path, sep='\t', skiprows=6)
-        ik_duration = ik_df['time'].iloc[-1] - ik_df['time'].iloc[0]
-        buf = min(BUFFER, ik_duration * 0.15)
-        t0 = ik_df['time'].iloc[0] + buf
-        t1 = ik_df['time'].iloc[-1] - buf
-        if t1 - t0 < 0.2:
-            print(f"  [{output_name}] Slice too short ({t1-t0:.1f}s)", flush=True)
-            return (output_name, 'convert_fail')
-
-        print(f"  [{output_name}] SO+JR [{t0:.2f}, {t1:.2f}]s...", flush=True)
-        ok = run_jcf(subj_output, t0, t1)
-        if ok:
-            print(f"  [{output_name}] SUCCESS", flush=True)
-            return (output_name, 'success')
-        else:
-            print(f"  [{output_name}] JCF output missing", flush=True)
-            return (output_name, 'jcf_fail')
+        return (output_name, 'success')
 
     except Exception as e:
         print(f"  [{output_name}] ERROR: {e}", flush=True)
@@ -479,7 +518,10 @@ def process_one_subject(args):
 # ─── Main batch loop ─────────────────────────────────────────────────────────
 
 def main():
+    global _scan_log_file
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
+    os.makedirs(OUTPUT_ROOT_RUNNING, exist_ok=True)
+    _scan_log_file = open(SCAN_LOG, 'w')
 
     # Filter to specific datasets (set to None to process all)
     DATASETS_TO_PROCESS = None
@@ -534,6 +576,9 @@ def main():
     with open(os.path.join(OUTPUT_ROOT, 'batch_results.json'), 'w') as f:
         json.dump(results, f, indent=2)
     print(f"\nResults saved to {OUTPUT_ROOT}/batch_results.json")
+
+    _scan_log_file.close()
+    print(f"Scan failure details: {SCAN_LOG}")
 
 
 if __name__ == '__main__':
