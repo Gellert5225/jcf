@@ -4,34 +4,47 @@ Produces per-subject metrics and a plot comparing predicted vs ground truth JCF.
 
 Usage:
     conda run -n jcf python test_cnn.py
+    conda run -n jcf python test_cnn.py --exp a
+    conda run -n jcf python test_cnn.py --exp b
 """
 
 import os
 import json
+import argparse
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
 # Reuse data loading and model from train_cnn
-from train_cnn import load_subject, JCF_CNN
+from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2
 
-TEST_ROOT = "./jcf/testing/walking"
-MODEL_PATH = "./jcf/training/walking/best_model.pt"
+TEST_ROOT = "./jcf/testing/running"
 DEVICE = "cpu"
 
 
-def test():
-    # Load checkpoint
-    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
-    n_features = checkpoint['n_features']
-    window_size = checkpoint['window_size']
+def test(exp=None):
+    suffix = f"_{exp}" if exp else ""
+    model_name = f"best_model_{exp}.pt" if exp else "best_model.pt"
+    model_path = f"./jcf/training/running/{model_name}"
 
-    model = JCF_CNN(n_features=n_features, n_outputs=3).to(DEVICE)
+    # Load checkpoint
+    checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=True)
+    log_targets = checkpoint.get('log_targets', False)
+    lower_body_only = checkpoint.get('lower_body_only', False)
+    model_class = checkpoint.get('model_class', 'v1')
+    n_features = checkpoint['n_features']
+    input_mean = checkpoint['input_mean']
+    input_std = checkpoint['input_std']
+
+    ModelClass = JCF_CNN_v2 if model_class == 'v2' else JCF_CNN
+    model = ModelClass(n_features=n_features, n_outputs=3).to(DEVICE)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     print(f"Loaded model from epoch {checkpoint['epoch']+1} "
           f"(val_loss={checkpoint['val_loss']:.6f})")
-    print(f"Window size: {window_size}, Features: {n_features}, Device: {DEVICE}")
+    print(f"Features: {n_features}, Device: {DEVICE}")
+    if lower_body_only:
+        print("Using lower-body joints only (0-19)")
 
     # Find test subjects
     subject_dirs = []
@@ -51,7 +64,7 @@ def test():
     # Predict on each subject using sliding window, then average overlaps
     all_results = []
     for subj_name, subj_dir in subject_dirs:
-        result = load_subject(subj_dir)
+        result = load_subject(subj_dir, lower_body_only=lower_body_only)
         if result is None:
             print(f"  {subj_name}: SKIP (missing files)")
             continue
@@ -60,23 +73,19 @@ def test():
         T = len(labels)
         BW = mass * 9.81
 
-        # Predict full sequence using overlapping windows, average predictions
-        pred_sum = np.zeros((T, 3))
-        pred_count = np.zeros(T)
-
+        # Single forward pass on the full sequence (with normalization)
         with torch.no_grad():
-            for start in range(0, T - window_size + 1, 1):
-                end = start + window_size
-                inp = torch.tensor(inputs[start:end], dtype=torch.float32)
-                inp = inp.unsqueeze(0).to(DEVICE)  # [1, W, F]
-                out = model(inp)                     # [1, W, 3]
-                pred_sum[start:end] += out[0].cpu().numpy()
-                pred_count[start:end] += 1
+            inp = torch.tensor(inputs, dtype=torch.float32)
+            inp = (inp - input_mean) / input_std
+            inp = inp.unsqueeze(0).to(DEVICE)
+            out = model(inp)  # [1, T, 3]
+            preds = out[0].cpu().numpy()
 
-        # Handle edges (frames with fewer overlapping windows)
-        valid = pred_count > 0
-        preds = np.zeros_like(pred_sum)
-        preds[valid] = pred_sum[valid] / pred_count[valid, None]
+        # Inverse log-space transform if model was trained with log targets
+        if log_targets:
+            preds = np.sign(preds) * (np.exp(np.abs(preds)) - 1)
+
+        valid = np.ones(T, dtype=bool)
 
         # Metrics (in BW)
         errors = preds[valid] - labels[valid]
@@ -114,7 +123,7 @@ def test():
 
     # ── Plot ──────────────────────────────────────────────────────────────────
     n_subjects = len(all_results)
-    fig, axes = plt.subplots(n_subjects, 2, figsize=(14, 5 * n_subjects),
+    fig, axes = plt.subplots(n_subjects, 4, figsize=(28, 5 * n_subjects),
                              squeeze=False)
 
     for i, res in enumerate(all_results):
@@ -124,18 +133,38 @@ def test():
         T = res['T']
         time = np.arange(T) * 0.01  # 100 Hz
 
-        # Left: Axial component (Fy)
+        # Col 0: Fx
         ax = axes[i, 0]
+        ax.plot(time[valid], labels[valid, 0], 'b-', linewidth=1.5, label='Ground Truth')
+        ax.plot(time[valid], preds[valid, 0], 'r--', linewidth=1.5, label='Predicted')
+        ax.set_ylabel('Fx (BW)')
+        ax.set_xlabel('Time (s)')
+        ax.set_title(f'{res["name"]} — Fx')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Col 1: Fy (axial)
+        ax = axes[i, 1]
         ax.plot(time[valid], labels[valid, 1], 'b-', linewidth=1.5, label='Ground Truth')
         ax.plot(time[valid], preds[valid, 1], 'r--', linewidth=1.5, label='Predicted')
         ax.set_ylabel('Fy (BW)')
         ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Axial Force (Fy)')
+        ax.set_title(f'{res["name"]} — Fy')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-        # Right: Resultant
-        ax = axes[i, 1]
+        # Col 2: Fz
+        ax = axes[i, 2]
+        ax.plot(time[valid], labels[valid, 2], 'b-', linewidth=1.5, label='Ground Truth')
+        ax.plot(time[valid], preds[valid, 2], 'r--', linewidth=1.5, label='Predicted')
+        ax.set_ylabel('Fz (BW)')
+        ax.set_xlabel('Time (s)')
+        ax.set_title(f'{res["name"]} — Fz')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Col 3: Resultant
+        ax = axes[i, 3]
         gt_res = np.sqrt(np.sum(labels[valid]**2, axis=1))
         pred_res = np.sqrt(np.sum(preds[valid]**2, axis=1))
         ax.plot(time[valid], gt_res, 'b-', linewidth=1.5, label='Ground Truth')
@@ -148,11 +177,93 @@ def test():
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    out_path = os.path.join(TEST_ROOT, 'test_results.png')
+    out_path = os.path.join(TEST_ROOT, f'test_results{suffix}.png')
     plt.savefig(out_path, dpi=150)
     print(f"\nPlot saved to {out_path}")
     plt.close()
 
+    # ── Write GT vs Predicted to text file ────────────────────────────────────
+    txt_path = os.path.join(TEST_ROOT, f'test_results{suffix}.txt')
+    with open(txt_path, 'w') as f:
+        for res in all_results:
+            labels = res['labels']
+            preds = res['preds']
+            valid = res['valid']
+            T = res['T']
+            time = np.arange(T) * 0.01
+
+            f.write(f"Subject: {res['name']}  (T={T}, mass={res['mass']:.1f}kg)\n")
+            f.write(f"{'Frame':>6}  {'Time':>8}  "
+                    f"{'GT_Fx':>10}  {'GT_Fy':>10}  {'GT_Fz':>10}  {'GT_Res':>10}  "
+                    f"{'Pred_Fx':>10}  {'Pred_Fy':>10}  {'Pred_Fz':>10}  {'Pred_Res':>10}\n")
+            f.write("-" * 114 + "\n")
+
+            for t in range(T):
+                if not valid[t]:
+                    continue
+                gt_res = np.sqrt(np.sum(labels[t]**2))
+                pred_res = np.sqrt(np.sum(preds[t]**2))
+                f.write(f"{t:>6}  {time[t]:>8.3f}  "
+                        f"{labels[t,0]:>10.5f}  {labels[t,1]:>10.5f}  {labels[t,2]:>10.5f}  {gt_res:>10.5f}  "
+                        f"{preds[t,0]:>10.5f}  {preds[t,1]:>10.5f}  {preds[t,2]:>10.5f}  {pred_res:>10.5f}\n")
+
+            f.write("\n")
+
+    print(f"GT vs Predicted written to {txt_path}")
+
+    # ── Scatter plot: predicted peak vs GT peak (diagnostic) ──────────────────
+    from scipy.signal import find_peaks
+
+    all_gt_peaks = []
+    all_pred_peaks = []
+    peak_labels = []
+    for res in all_results:
+        labels = res['labels']
+        preds = res['preds']
+        valid = res['valid']
+        gt_res = np.sqrt(np.sum(labels[valid]**2, axis=1))
+        pred_res = np.sqrt(np.sum(preds[valid]**2, axis=1))
+        peaks, _ = find_peaks(gt_res, height=0.5, distance=15)
+        for p in peaks:
+            all_gt_peaks.append(gt_res[p])
+            all_pred_peaks.append(pred_res[p])
+            peak_labels.append(res['name'])
+
+    if all_gt_peaks:
+        all_gt_peaks = np.array(all_gt_peaks)
+        all_pred_peaks = np.array(all_pred_peaks)
+
+        fig, ax = plt.subplots(figsize=(7, 7))
+        ax.scatter(all_gt_peaks, all_pred_peaks, alpha=0.7, edgecolors='k', linewidth=0.5)
+        lims = [0, max(all_gt_peaks.max(), all_pred_peaks.max()) * 1.1]
+        ax.plot(lims, lims, 'k--', linewidth=1, label='y = x')
+
+        # Linear fit
+        slope, intercept = np.polyfit(all_gt_peaks, all_pred_peaks, 1)
+        x_fit = np.linspace(lims[0], lims[1], 100)
+        ax.plot(x_fit, slope * x_fit + intercept, 'r-', linewidth=1.5,
+                label=f'Fit: y = {slope:.3f}x + {intercept:.3f}')
+
+        ax.set_xlabel('GT Peak Resultant (BW)')
+        ax.set_ylabel('Predicted Peak Resultant (BW)')
+        ax.set_title('Peak Prediction Scatter (all subjects)')
+        ax.legend()
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+
+        scatter_path = os.path.join(TEST_ROOT, f'peak_scatter{suffix}.png')
+        plt.savefig(scatter_path, dpi=150, bbox_inches='tight')
+        print(f"Peak scatter saved to {scatter_path}")
+        plt.close()
+
+        print(f"  Fit: slope={slope:.3f}, intercept={intercept:.3f}")
+        print(f"  Mean ratio: {np.mean(all_pred_peaks/all_gt_peaks):.3f}")
+
 
 if __name__ == '__main__':
-    test()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f'])
+    args = parser.parse_args()
+    test(exp=args.exp)
