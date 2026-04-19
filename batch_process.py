@@ -603,10 +603,12 @@ def process_one_subject(args):
                 else:
                     seg_name = f"{output_name}_t{t:02d}_r{run_idx:02d}"
 
-                # Classify activity by per-foot peak GRF
+                # Classify activity by per-foot peak GRF — skip walking
                 is_running = seg['peak_foot_grf_bw'] > GRF_CAP_WALKING
-                activity = 'running' if is_running else 'walking'
-                out_root = OUTPUT_ROOT_RUNNING if is_running else OUTPUT_ROOT_WALKING
+                if not is_running:
+                    n_skip += 1
+                    continue
+                out_root = OUTPUT_ROOT_RUNNING
 
                 subj_output = os.path.join(out_root, seg_name)
                 done = os.path.exists(os.path.join(
@@ -616,7 +618,7 @@ def process_one_subject(args):
                     n_skip += 1
                     continue
 
-                print(f"  [{seg_name}] {activity} — trial {t}, "
+                print(f"  [{seg_name}] running — trial {t}, "
                       f"frames {seg['start_frame']}-{seg['start_frame']+seg['num_frames']}, "
                       f"{seg['duration']:.1f}s, peak={seg['peak_foot_grf_bw']:.1f}BW",
                       flush=True)
