@@ -30,6 +30,7 @@ import glob
 import argparse
 import numpy as np
 import pandas as pd
+import math
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -47,6 +48,41 @@ N_LOWER_BODY = 20       # joints 0-19: pelvis, hips, knees, ankles, feet
 
 
 # ─── Data Quality Filter ──────────────────────────────────────────────────────
+
+def filter_flat_subjects(subject_dirs, cv_threshold=0.25, dr_threshold=0.3,
+                         jcf_subdir='jcf_output'):
+    """
+    Remove subjects whose JCF resultant waveform is flat (no cyclic peaks).
+    A subject is 'flat' if its coefficient of variation < cv_threshold
+    OR its dynamic range < dr_threshold (in BW).
+
+    Returns (kept_dirs, n_removed).
+    """
+    kept = []
+    removed = 0
+    for subj_dir in subject_dirs:
+        jcf_path = os.path.join(subj_dir, jcf_subdir,
+                                'BatchJCF_JointReaction_ReactionLoads.sto')
+        meta_path = os.path.join(subj_dir, 'metadata.json')
+        if not os.path.exists(jcf_path) or not os.path.exists(meta_path):
+            kept.append(subj_dir)
+            continue
+        with open(meta_path) as f:
+            mass = json.load(f)['mass_kg']
+        BW = mass * 9.81
+        jcf = load_sto(jcf_path)
+        fx = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fx'].values
+        fy = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fy'].values
+        fz = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fz'].values
+        resultant = np.sqrt(fx**2 + fy**2 + fz**2) / BW
+        cv = resultant.std() / (resultant.mean() + 1e-12)
+        dr = resultant.max() - resultant.min()
+        if cv < cv_threshold or dr < dr_threshold:
+            removed += 1
+        else:
+            kept.append(subj_dir)
+    return kept, removed
+
 
 def get_clean_subjects(subject_dirs, max_multi_sat_frames=0):
     """
@@ -126,7 +162,8 @@ def load_sto(path, skiprows=11):
     return pd.read_csv(path, sep='\t', skiprows=skiprows)
 
 
-def load_subject(subject_dir, lower_body_only=False, with_confidence=False):
+def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
+                 jcf_subdir='jcf_output'):
     """
     Load one subject's data. Returns (inputs, labels, mass) or None.
     
@@ -135,7 +172,7 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False):
     """
     ik_path = os.path.join(subject_dir, 'ik_results.mot')
     grf_path = os.path.join(subject_dir, 'grf_data.mot')
-    jcf_path = os.path.join(subject_dir, 'jcf_output',
+    jcf_path = os.path.join(subject_dir, jcf_subdir,
                             'BatchJCF_JointReaction_ReactionLoads.sto')
     meta_path = os.path.join(subject_dir, 'metadata.json')
 
@@ -221,13 +258,15 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False):
 class JCFDataset(Dataset):
     """Full-sequence dataset. Each item is one subject's entire trial."""
 
-    def __init__(self, subject_dirs, lower_body_only=False, with_confidence=False):
+    def __init__(self, subject_dirs, lower_body_only=False, with_confidence=False,
+                 jcf_subdir='jcf_output'):
         self.sequences = []  # list of (inputs, labels, length) or (inputs, labels, length, confidence)
         self.has_confidence = with_confidence
 
         for subj_dir in subject_dirs:
             result = load_subject(subj_dir, lower_body_only=lower_body_only,
-                                 with_confidence=with_confidence)
+                                 with_confidence=with_confidence,
+                                 jcf_subdir=jcf_subdir)
             if result is None:
                 continue
             if with_confidence:
@@ -416,28 +455,109 @@ class JCF_CNN_v2(nn.Module):
         return x
 
 
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding."""
+    def __init__(self, d_model, max_len=1000, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))  # [1, max_len, d_model]
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+
+
+class JCF_Transformer(nn.Module):
+    """
+    Conv stem + Transformer encoder for JCF prediction.
+    Self-attention provides global trial context for better peak tracking.
+
+    Input:  [batch, seq_len, n_features]
+    Output: [batch, seq_len, 3]
+    """
+
+    def __init__(self, n_features=72, n_outputs=3, d_model=128, nhead=8,
+                 num_layers=4, dim_feedforward=256, dropout=0.1):
+        super().__init__()
+
+        # Conv stem: extract local temporal features
+        self.conv_stem = nn.Sequential(
+            nn.Conv1d(n_features, d_model, kernel_size=7, padding=3),
+            nn.GroupNorm(8, d_model),
+            nn.ReLU(),
+            nn.Conv1d(d_model, d_model, kernel_size=5, padding=2),
+            nn.GroupNorm(8, d_model),
+            nn.ReLU(),
+        )
+
+        self.pos_enc = PositionalEncoding(d_model, max_len=1000, dropout=dropout)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout, batch_first=True,
+            norm_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.ReLU(),
+            nn.Linear(64, n_outputs),
+        )
+
+    def forward(self, x, mask=None):
+        # x: [B, T, F]
+        x = x.permute(0, 2, 1)      # [B, F, T]
+        x = self.conv_stem(x)        # [B, d_model, T]
+        x = x.permute(0, 2, 1)      # [B, T, d_model]
+        x = self.pos_enc(x)
+
+        src_key_padding_mask = ~mask if mask is not None else None
+        x = self.transformer(x, src_key_padding_mask=src_key_padding_mask)
+
+        x = self.head(x)             # [B, T, n_outputs]
+        return x
+
+
 # ─── Training ─────────────────────────────────────────────────────────────────
 
-def train(exp=None):
+def train(exp=None, filter_flat=True):
     EXP = exp
-    lower_body = EXP in ('c', 'd')
-    use_v2 = EXP == 'd'
-    rebalance = EXP == 'd'
+    lower_body = EXP in ('c', 'd', 'g', 'h')
+    use_v2 = EXP in ('d', 'g')
+    use_transformer = EXP == 'h'
+    rebalance = EXP in ('d', 'g', 'h')
     clean_only = EXP == 'e'
     use_confidence = EXP == 'f'
+    scaled_labels = EXP in ('g', 'h')  # use 2x muscle-scaled SO labels
     # Find all subjects with JCF output
+    jcf_subdir = 'jcf_output_2x' if scaled_labels else 'jcf_output'
     subject_dirs = []
     for name in sorted(os.listdir(DATA_ROOT)):
         subj_dir = os.path.join(DATA_ROOT, name)
-        jcf_sto = os.path.join(subj_dir, 'jcf_output',
+        jcf_sto = os.path.join(subj_dir, jcf_subdir,
                                'BatchJCF_JointReaction_ReactionLoads.sto')
         if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
             subject_dirs.append(subj_dir)
+    if scaled_labels:
+        print(f"Using scaled JCF labels from {jcf_subdir}/")
 
     print(f"Found {len(subject_dirs)} subjects with JCF data")
     if len(subject_dirs) == 0:
         print("No data! Run batch_process.py first.")
         return
+
+    # Filter out flat (non-cyclic) waveforms
+    if filter_flat:
+        n_before = len(subject_dirs)
+        subject_dirs, n_flat = filter_flat_subjects(subject_dirs, jcf_subdir=jcf_subdir)
+        print(f"Flat-waveform filter: {n_before} → {len(subject_dirs)} subjects ({n_flat} flat removed)")
 
     # Exp E: filter to clean SO convergence subjects only
     if clean_only:
@@ -457,7 +577,8 @@ def train(exp=None):
     # Create datasets
     print("Loading training data...")
     train_ds = JCFDataset(train_dirs, lower_body_only=lower_body,
-                          with_confidence=use_confidence)
+                          with_confidence=use_confidence,
+                          jcf_subdir=jcf_subdir)
     print(f"  {len(train_ds)} training sequences")
 
     # Compute global normalization stats from training data
@@ -472,7 +593,8 @@ def train(exp=None):
 
     print("Loading validation data...")
     val_ds = JCFDataset(val_dirs, lower_body_only=lower_body,
-                        with_confidence=use_confidence)
+                        with_confidence=use_confidence,
+                        jcf_subdir=jcf_subdir)
     val_ds.normalize(input_mean, input_std)
     print(f"  {len(val_ds)} validation sequences")
 
@@ -502,7 +624,7 @@ def train(exp=None):
         # Re-derive from train_dirs that successfully loaded
         loaded_prefixes = []
         for d in train_dirs:
-            result = load_subject(d, lower_body_only=lower_body)
+            result = load_subject(d, lower_body_only=lower_body, jcf_subdir=jcf_subdir)
             if result is not None:
                 loaded_prefixes.append(os.path.basename(d).split('_')[0])
         dataset_counts_loaded = {}
@@ -528,7 +650,10 @@ def train(exp=None):
     print(f"Input features per frame: {n_features}")
 
     # Create model
-    if use_v2:
+    if use_transformer:
+        model = JCF_Transformer(n_features=n_features, n_outputs=3).to(DEVICE)
+        print("Using JCF_Transformer (conv stem + transformer encoder)")
+    elif use_v2:
         model = JCF_CNN_v2(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_CNN_v2 (residual blocks, wider)")
     else:
@@ -593,7 +718,7 @@ def train(exp=None):
     if EXP == 'f':
         criterion = confidence_weighted_loss
         print("Loss: confidence-weighted symmetric (MSE + magnitude + gradient)")
-    elif EXP in ('a', 'c', 'd', 'e'):
+    elif EXP in ('a', 'c', 'd', 'e', 'h'):
         criterion = symmetric_loss
         print("Loss: symmetric (MSE + magnitude-weighted + gradient)")
     elif EXP == 'b':
@@ -620,7 +745,7 @@ def train(exp=None):
             confidence = confidence.to(DEVICE)
 
             optimizer.zero_grad()
-            preds = model(inputs)
+            preds = model(inputs, mask=mask) if use_transformer else model(inputs)
             loss = criterion(preds, labels, mask, confidence=confidence)
             loss.backward()
             optimizer.step()
@@ -642,7 +767,7 @@ def train(exp=None):
                 mask = mask.to(DEVICE)
                 mask_3d = mask.unsqueeze(-1)
 
-                preds = model(inputs)
+                preds = model(inputs, mask=mask) if use_transformer else model(inputs)
                 # Masked MSE for val
                 sq_err = (preds - labels) ** 2 * mask_3d
                 n_valid = mask.sum().float()
@@ -682,7 +807,8 @@ def train(exp=None):
                 'input_std': input_std,
                 'log_targets': (EXP == 'b'),
                 'lower_body_only': lower_body,
-                'model_class': 'v2' if use_v2 else 'v1',
+                'model_class': 'transformer' if use_transformer else ('v2' if use_v2 else 'v1'),
+                'jcf_subdir': jcf_subdir,
             }, os.path.join(DATA_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
@@ -692,7 +818,9 @@ def train(exp=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f'],
-                        help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted')
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
+                        help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled')
+    parser.add_argument('--no-flat-filter', action='store_true',
+                        help='Disable flat-waveform quality filter (keep all subjects)')
     args = parser.parse_args()
-    train(exp=args.exp)
+    train(exp=args.exp, filter_flat=not args.no_flat_filter)

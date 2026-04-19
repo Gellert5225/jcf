@@ -32,7 +32,8 @@ B3D_ROOT = "./with_arm/testing"
 OUTPUT_ROOT = "./jcf/testing"
 OUTPUT_ROOT_WALKING = "./jcf/testing/walking"
 OUTPUT_ROOT_RUNNING = "./jcf/testing/running"
-WINDOW_DURATION = 2.0   # seconds — roughly one gait cycle
+WINDOW_DURATION = 2.0   # seconds — used when FULL_DURATION=False
+FULL_DURATION = True    # Extract all valid GRF segments instead of 2s windows
 BUFFER = 0.3            # padding for filter edge effects
 GRF_CAP_WALKING = 1.7   # BW — per-foot peak cap for walking
 GRF_CAP_RUNNING = 3.5   # BW — per-foot peak cap for running
@@ -308,6 +309,110 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0, grf_cap_bw=GRF_CAP_WALKI
     return (trial, sf, nf, mass_kg)
 
 
+def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION):
+    """
+    Scan a b3d file and return ALL valid contiguous GRF segments
+    where the subject is bearing weight.
+
+    Returns list of dicts:
+        {'trial': int, 'start_frame': int, 'num_frames': int,
+         'mass_kg': float, 'dt': float, 'duration': float,
+         'peak_foot_grf_bw': float}
+    or empty list on failure.
+    """
+    import nimblephysics as nimble
+
+    subject = nimble.biomechanics.SubjectOnDisk(b3d_path)
+    mass_kg = subject.getMassKg()
+    if mass_kg <= 0:
+        _scan_log(f"{b3d_path}: invalid mass ({mass_kg})")
+        return []
+    BW = mass_kg * 9.81
+
+    contact_bodies = subject.getGroundForceBodies()
+    foot_indices = [i for i, b in enumerate(contact_bodies) if 'calcn' in b]
+    if len(foot_indices) < 2:
+        _scan_log(f"{b3d_path}: <2 foot contacts (bodies: {list(contact_bodies)})")
+        return []
+
+    segments = []
+
+    for trial in range(subject.getNumTrials()):
+        trial_len = subject.getTrialLength(trial)
+        trial_passes = subject.getTrialNumProcessingPasses(trial)
+        if trial_passes < 2 or trial_len < 10:
+            continue
+
+        dt = subject.getTrialTimestep(trial)
+        min_frames = max(10, int(min_duration / dt))
+
+        missing = subject.getMissingGRF(trial)
+        valid = [m == nimble.biomechanics.MissingGRFReason.notMissingGRF
+                 for m in missing]
+
+        # Find contiguous valid GRF runs
+        runs = []
+        run_start = None
+        for i, v in enumerate(valid):
+            if v and run_start is None:
+                run_start = i
+            elif not v and run_start is not None:
+                run_len = i - run_start
+                if run_len >= min_frames:
+                    runs.append((run_start, run_len))
+                run_start = None
+        if run_start is not None:
+            run_len = len(valid) - run_start
+            if run_len >= min_frames:
+                runs.append((run_start, run_len))
+
+        for rs, rl in runs:
+            try:
+                frames = subject.readFrames(trial, rs, rl,
+                                            includeSensorData=False,
+                                            includeProcessingPasses=True)
+            except Exception:
+                continue
+
+            # Extract per-foot vertical GRF
+            vy_r = np.zeros(rl)
+            vy_l = np.zeros(rl)
+            for fi, f in enumerate(frames):
+                if len(f.processingPasses) < 1:
+                    continue
+                fp = f.processingPasses[-1]
+                grf = np.array(fp.groundContactForce)
+                n_contacts = len(grf) // 3
+                for idx in foot_indices:
+                    if idx < n_contacts:
+                        vy = grf[idx * 3 + 1]
+                        body_name = contact_bodies[idx]
+                        if '_r' in body_name:
+                            vy_r[fi] = vy
+                        else:
+                            vy_l[fi] = vy
+
+            total_vy = vy_r + vy_l
+            mean_grf = np.mean(total_vy)
+            if mean_grf < 0.3 * BW:
+                continue  # not enough loading — static or swing
+
+            peak_foot = max(np.max(vy_r), np.max(vy_l))
+            duration = rl * dt
+
+            segments.append({
+                'trial': trial,
+                'start_frame': rs,
+                'num_frames': rl,
+                'mass_kg': mass_kg,
+                'dt': dt,
+                'duration': duration,
+                'peak_foot_grf_bw': peak_foot / BW,
+            })
+
+    return segments
+
+
 # ─── Step 2: Convert only the needed slice ────────────────────────────────────
 
 def convert_b3d_slice(b3d_path, output_dir, trial, start_frame, num_frames,
@@ -468,47 +573,100 @@ def process_one_subject(args):
     output_name = f"{prefix}_{subject_name}"
     tag = f"[{idx+1}/{total}] {dataset_name}/{subject_name}"
 
-    # Check if already processed
-    subj_walking = os.path.join(OUTPUT_ROOT_WALKING, output_name)
-    subj_running = os.path.join(OUTPUT_ROOT_RUNNING, output_name)
-    walking_done = os.path.exists(os.path.join(
-        subj_walking, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
-    running_done = os.path.exists(os.path.join(
-        subj_running, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
-
     print(f"\n{tag}: Processing...", flush=True)
 
     try:
-        # Step 1: Scan b3d — try walking cap first
-        print(f"  [{output_name}] Scanning b3d...", flush=True)
-        scan_walk = scan_b3d_for_walking(b3d_path, WINDOW_DURATION, GRF_CAP_WALKING) if not walking_done else None
-        scan_run = scan_b3d_for_walking(b3d_path, WINDOW_DURATION, GRF_CAP_RUNNING) if not running_done else None
+        if FULL_DURATION:
+            # --- Full duration: extract ALL valid GRF segments ---
+            print(f"  [{output_name}] Scanning for all valid segments...", flush=True)
+            segments = scan_b3d_all_runs(b3d_path)
+            if not segments:
+                print(f"  [{output_name}] No valid segments", flush=True)
+                return (output_name, 'scan_fail')
 
-        if walking_done and running_done:
-            print(f"  [{output_name}] SKIP (both done)", flush=True)
-            return (output_name, 'skip')
+            # Naming: t{trial}, add _r{run} if multiple runs per trial
+            trial_run_counts = {}
+            for seg in segments:
+                t = seg['trial']
+                trial_run_counts[t] = trial_run_counts.get(t, 0) + 1
 
-        # Process walking
-        if scan_walk is not None and not walking_done:
-            trial, start_frame, num_frames, mass_kg = scan_walk
-            print(f"  [{output_name}] walking — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
-                  f"mass={mass_kg:.1f}kg", flush=True)
-            _process_activity(output_name, b3d_path, subj_walking, OUTPUT_ROOT_WALKING,
-                              trial, start_frame, num_frames)
+            trial_run_seen = {}
+            n_ok = 0
+            n_skip = 0
+            for seg in segments:
+                t = seg['trial']
+                run_idx = trial_run_seen.get(t, 0)
+                trial_run_seen[t] = run_idx + 1
 
-        # Process running
-        if scan_run is not None and not running_done:
-            trial, start_frame, num_frames, mass_kg = scan_run
-            print(f"  [{output_name}] running — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
-                  f"mass={mass_kg:.1f}kg", flush=True)
-            _process_activity(output_name, b3d_path, subj_running, OUTPUT_ROOT_RUNNING,
-                              trial, start_frame, num_frames)
+                if trial_run_counts[t] == 1:
+                    seg_name = f"{output_name}_t{t:02d}"
+                else:
+                    seg_name = f"{output_name}_t{t:02d}_r{run_idx:02d}"
 
-        if scan_walk is None and scan_run is None and not walking_done and not running_done:
-            print(f"  [{output_name}] No valid window", flush=True)
-            return (output_name, 'scan_fail')
+                # Classify activity by per-foot peak GRF
+                is_running = seg['peak_foot_grf_bw'] > GRF_CAP_WALKING
+                activity = 'running' if is_running else 'walking'
+                out_root = OUTPUT_ROOT_RUNNING if is_running else OUTPUT_ROOT_WALKING
 
-        return (output_name, 'success')
+                subj_output = os.path.join(out_root, seg_name)
+                done = os.path.exists(os.path.join(
+                    subj_output, 'jcf_output',
+                    "BatchJCF_JointReaction_ReactionLoads.sto"))
+                if done:
+                    n_skip += 1
+                    continue
+
+                print(f"  [{seg_name}] {activity} — trial {t}, "
+                      f"frames {seg['start_frame']}-{seg['start_frame']+seg['num_frames']}, "
+                      f"{seg['duration']:.1f}s, peak={seg['peak_foot_grf_bw']:.1f}BW",
+                      flush=True)
+                ok = _process_activity(seg_name, b3d_path, subj_output, out_root,
+                                       seg['trial'], seg['start_frame'],
+                                       seg['num_frames'])
+                if ok:
+                    n_ok += 1
+
+            total_segs = len(segments)
+            print(f"  [{output_name}] {n_ok} new + {n_skip} existing / {total_segs} segments",
+                  flush=True)
+            return (output_name, 'success' if (n_ok + n_skip) > 0 else 'jcf_fail')
+
+        else:
+            # --- Original: single best 2s window per activity ---
+            subj_walking = os.path.join(OUTPUT_ROOT_WALKING, output_name)
+            subj_running = os.path.join(OUTPUT_ROOT_RUNNING, output_name)
+            walking_done = os.path.exists(os.path.join(
+                subj_walking, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
+            running_done = os.path.exists(os.path.join(
+                subj_running, 'jcf_output', "BatchJCF_JointReaction_ReactionLoads.sto"))
+
+            print(f"  [{output_name}] Scanning b3d...", flush=True)
+            scan_walk = scan_b3d_for_walking(b3d_path, WINDOW_DURATION, GRF_CAP_WALKING) if not walking_done else None
+            scan_run = scan_b3d_for_walking(b3d_path, WINDOW_DURATION, GRF_CAP_RUNNING) if not running_done else None
+
+            if walking_done and running_done:
+                print(f"  [{output_name}] SKIP (both done)", flush=True)
+                return (output_name, 'skip')
+
+            if scan_walk is not None and not walking_done:
+                trial, start_frame, num_frames, mass_kg = scan_walk
+                print(f"  [{output_name}] walking — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
+                      f"mass={mass_kg:.1f}kg", flush=True)
+                _process_activity(output_name, b3d_path, subj_walking, OUTPUT_ROOT_WALKING,
+                                  trial, start_frame, num_frames)
+
+            if scan_run is not None and not running_done:
+                trial, start_frame, num_frames, mass_kg = scan_run
+                print(f"  [{output_name}] running — trial {trial}, frames {start_frame}-{start_frame+num_frames}, "
+                      f"mass={mass_kg:.1f}kg", flush=True)
+                _process_activity(output_name, b3d_path, subj_running, OUTPUT_ROOT_RUNNING,
+                                  trial, start_frame, num_frames)
+
+            if scan_walk is None and scan_run is None and not walking_done and not running_done:
+                print(f"  [{output_name}] No valid window", flush=True)
+                return (output_name, 'scan_fail')
+
+            return (output_name, 'success')
 
     except Exception as e:
         print(f"  [{output_name}] ERROR: {e}", flush=True)

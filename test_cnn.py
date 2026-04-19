@@ -16,7 +16,7 @@ import torch
 import matplotlib.pyplot as plt
 
 # Reuse data loading and model from train_cnn
-from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2
+from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_Transformer
 
 TEST_ROOT = "./jcf/testing/running"
 DEVICE = "cpu"
@@ -32,11 +32,17 @@ def test(exp=None):
     log_targets = checkpoint.get('log_targets', False)
     lower_body_only = checkpoint.get('lower_body_only', False)
     model_class = checkpoint.get('model_class', 'v1')
+    jcf_subdir = checkpoint.get('jcf_subdir', 'jcf_output')
     n_features = checkpoint['n_features']
     input_mean = checkpoint['input_mean']
     input_std = checkpoint['input_std']
 
-    ModelClass = JCF_CNN_v2 if model_class == 'v2' else JCF_CNN
+    if model_class == 'transformer':
+        ModelClass = JCF_Transformer
+    elif model_class == 'v2':
+        ModelClass = JCF_CNN_v2
+    else:
+        ModelClass = JCF_CNN
     model = ModelClass(n_features=n_features, n_outputs=3).to(DEVICE)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
@@ -45,12 +51,14 @@ def test(exp=None):
     print(f"Features: {n_features}, Device: {DEVICE}")
     if lower_body_only:
         print("Using lower-body joints only (0-19)")
+    if jcf_subdir != 'jcf_output':
+        print(f"Using JCF labels from {jcf_subdir}/")
 
     # Find test subjects
     subject_dirs = []
     for name in sorted(os.listdir(TEST_ROOT)):
         subj_dir = os.path.join(TEST_ROOT, name)
-        jcf_sto = os.path.join(subj_dir, 'jcf_output',
+        jcf_sto = os.path.join(subj_dir, jcf_subdir,
                                'BatchJCF_JointReaction_ReactionLoads.sto')
         if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
             subject_dirs.append((name, subj_dir))
@@ -64,7 +72,8 @@ def test(exp=None):
     # Predict on each subject using sliding window, then average overlaps
     all_results = []
     for subj_name, subj_dir in subject_dirs:
-        result = load_subject(subj_dir, lower_body_only=lower_body_only)
+        result = load_subject(subj_dir, lower_body_only=lower_body_only,
+                             jcf_subdir=jcf_subdir)
         if result is None:
             print(f"  {subj_name}: SKIP (missing files)")
             continue
@@ -264,6 +273,6 @@ def test(exp=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f'])
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
     args = parser.parse_args()
     test(exp=args.exp)
