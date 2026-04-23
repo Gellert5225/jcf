@@ -38,13 +38,18 @@ from sklearn.model_selection import train_test_split
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-DATA_ROOT = "./jcf/training/running"
+DATA_ROOT = "./jcf/full_duration/training/running"
 BATCH_SIZE = 8          # full sequences per batch (pad to max length)
 EPOCHS = 200
 LEARNING_RATE = 1e-3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TRAIN_SPLIT = 0.8       # 80% train, 20% val (by subject)
 N_LOWER_BODY = 20       # joints 0-19: pelvis, hips, knees, ankles, feet
+
+# Pelvis translations (absolute lab position) — non-stationary, must be zero-centered per trial
+PELVIS_TX_COLS = [3, 4, 5]  # pelvis_tx, pelvis_ty, pelvis_tz
+# Locked/dead joints — near-zero variance across training data
+DEAD_JOINT_COLS = [11, 12, 18, 19]  # subtalar_angle_r, mtp_angle_r, subtalar_angle_l, mtp_angle_l
 
 
 # ─── Data Quality Filter ──────────────────────────────────────────────────────
@@ -163,12 +168,15 @@ def load_sto(path, skiprows=11):
 
 
 def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
-                 jcf_subdir='jcf_output'):
+                 jcf_subdir='jcf_output', clean_features=False):
     """
     Load one subject's data. Returns (inputs, labels, mass) or None.
-    
+
     inputs: [T, n_features]  (positions + GRF)
     labels: [T, 3]           (Fx, Fy, Fz in BW)
+
+    clean_features: if True, zero-center pelvis translations per trial
+                    and remove dead joints (subtalar, mtp).
     """
     ik_path = os.path.join(subject_dir, 'ik_results.mot')
     grf_path = os.path.join(subject_dir, 'grf_data.mot')
@@ -237,9 +245,18 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
         ik_vel = ik_vel[:, :N_LOWER_BODY]
         ik_acc = ik_acc[:, :N_LOWER_BODY]
 
+    if clean_features:
+        # Zero-center pelvis translations per trial (remove absolute lab position)
+        ik_interp[:, PELVIS_TX_COLS] -= ik_interp[:, PELVIS_TX_COLS].mean(axis=0)
+        # Remove dead joints (subtalar, mtp) from positions, velocities, accelerations
+        n_joints = ik_interp.shape[1]
+        keep = [j for j in range(n_joints) if j not in DEAD_JOINT_COLS]
+        ik_interp = ik_interp[:, keep]
+        ik_vel = ik_vel[:, keep]
+        ik_acc = ik_acc[:, keep]
+
     # Concatenate inputs: [positions, velocities, accelerations, GRF, GRF_vel]
     inputs = np.hstack([ik_interp, ik_vel, ik_acc, grf_interp, grf_vel])
-    # [T, 37+37+37+6+6 = 123]
 
     if with_confidence:
         conf = load_confidence_weights(subject_dir)
@@ -259,14 +276,14 @@ class JCFDataset(Dataset):
     """Full-sequence dataset. Each item is one subject's entire trial."""
 
     def __init__(self, subject_dirs, lower_body_only=False, with_confidence=False,
-                 jcf_subdir='jcf_output'):
+                 jcf_subdir='jcf_output', clean_features=False):
         self.sequences = []  # list of (inputs, labels, length) or (inputs, labels, length, confidence)
         self.has_confidence = with_confidence
 
         for subj_dir in subject_dirs:
             result = load_subject(subj_dir, lower_body_only=lower_body_only,
                                  with_confidence=with_confidence,
-                                 jcf_subdir=jcf_subdir)
+                                 jcf_subdir=jcf_subdir, clean_features=clean_features)
             if result is None:
                 continue
             if with_confidence:
@@ -455,6 +472,126 @@ class JCF_CNN_v2(nn.Module):
         return x
 
 
+class TCNBlock(nn.Module):
+    """Single TCN block: dilated causal conv + residual."""
+    def __init__(self, channels, kernel_size=3, dilation=1, dropout=0.1):
+        super().__init__()
+        padding = (kernel_size - 1) * dilation
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size,
+                               padding=padding, dilation=dilation)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size,
+                               padding=padding, dilation=dilation)
+        self.norm1 = nn.GroupNorm(8, channels)
+        self.norm2 = nn.GroupNorm(8, channels)
+        self.dropout = nn.Dropout(dropout)
+        self.padding = padding
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        # x: [B, C, T]
+        residual = x
+        out = self.conv1(x)
+        if self.padding > 0:
+            out = out[:, :, :-self.padding]
+        out = self.norm1(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        out = self.conv2(out)
+        if self.padding > 0:
+            out = out[:, :, :-self.padding]
+        out = self.norm2(out)
+        out = self.relu(out)
+        out = self.dropout(out)
+        return self.relu(out + residual)
+
+
+class JCF_TCN(nn.Module):
+    """
+    Temporal Convolutional Network with skip connections from each dilation level.
+    Uses causal convolutions with dilation factors [1,2,4,8,16,32,64] for ~384-frame RF.
+
+    Input:  [batch, seq_len, n_features]
+    Output: [batch, seq_len, 3]
+    """
+
+    def __init__(self, n_features=60, n_outputs=3, hidden=128, kernel_size=3,
+                 dilations=(1, 2, 4, 8, 16, 32, 64), dropout=0.1):
+        super().__init__()
+        self.input_proj = nn.Sequential(
+            nn.Conv1d(n_features, hidden, kernel_size=1),
+            nn.GroupNorm(8, hidden),
+            nn.ReLU(),
+        )
+        self.tcn_blocks = nn.ModuleList([
+            TCNBlock(hidden, kernel_size=kernel_size, dilation=d, dropout=dropout)
+            for d in dilations
+        ])
+        self.skip_proj = nn.ModuleList([
+            nn.Conv1d(hidden, hidden // 2, kernel_size=1)
+            for _ in dilations
+        ])
+        self.head = nn.Sequential(
+            nn.Conv1d(hidden // 2 * len(dilations) + hidden, 64, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(64, n_outputs, kernel_size=1),
+        )
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)  # [B, F, T]
+        x = self.input_proj(x)   # [B, hidden, T]
+        skips = []
+        for block, skip in zip(self.tcn_blocks, self.skip_proj):
+            x = block(x)
+            skips.append(skip(x))
+        out = torch.cat([x] + skips, dim=1)  # [B, hidden + hidden//2 * n_levels, T]
+        out = self.head(out)
+        return out.permute(0, 2, 1)  # [B, T, 3]
+
+
+class JCF_FFT_MLP(nn.Module):
+    """
+    Per-frame MLP with windowed FFT features.
+    For each frame, extracts a local window, computes FFT magnitude spectrum,
+    and concatenates with the raw features as input to an MLP.
+
+    Input:  [batch, seq_len, n_features]
+    Output: [batch, seq_len, 3]
+    """
+
+    def __init__(self, n_features=60, n_outputs=3, window_size=64,
+                 hidden=256, dropout=0.1):
+        super().__init__()
+        self.window_size = window_size
+        self.n_features = n_features
+        n_fft_bins = window_size // 2 + 1
+        self.n_fft_bins = n_fft_bins
+        fft_features = n_features * n_fft_bins
+        total_input = n_features + fft_features
+        self.mlp = nn.Sequential(
+            nn.Linear(total_input, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden // 2),
+            nn.ReLU(),
+            nn.Linear(hidden // 2, n_outputs),
+        )
+
+    def forward(self, x):
+        # x: [B, T, F]
+        B, T, F = x.shape
+        half_w = self.window_size // 2
+        x_padded = torch.nn.functional.pad(x, (0, 0, half_w, half_w - 1), mode='reflect')
+        windows = x_padded.unfold(1, self.window_size, 1)  # [B, T, F, W]
+        fft_out = torch.fft.rfft(windows, dim=-1)  # [B, T, F, W//2+1]
+        fft_mag = torch.log1p(fft_out.abs())  # [B, T, F, n_fft_bins]
+        fft_flat = fft_mag.reshape(B, T, F * self.n_fft_bins)
+        mlp_input = torch.cat([x, fft_flat], dim=-1)  # [B, T, F + F*n_fft_bins]
+        return self.mlp(mlp_input)
+
+
 class PositionalEncoding(nn.Module):
     """Sinusoidal positional encoding."""
     def __init__(self, d_model, max_len=1000, dropout=0.1):
@@ -529,12 +666,15 @@ class JCF_Transformer(nn.Module):
 
 def train(exp=None, filter_flat=True):
     EXP = exp
-    lower_body = EXP in ('c', 'd', 'g', 'h')
-    use_v2 = EXP in ('d', 'g')
+    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm')
+    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k')
     use_transformer = EXP == 'h'
-    rebalance = EXP in ('d', 'g', 'h')
+    use_tcn = EXP == 'l'
+    use_fft_mlp = EXP == 'm'
+    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm')
     clean_only = EXP == 'e'
     use_confidence = EXP == 'f'
+    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm')
     scaled_labels = EXP in ('g', 'h')  # use 2x muscle-scaled SO labels
     # Find all subjects with JCF output
     jcf_subdir = 'jcf_output_2x' if scaled_labels else 'jcf_output'
@@ -547,6 +687,8 @@ def train(exp=None, filter_flat=True):
             subject_dirs.append(subj_dir)
     if scaled_labels:
         print(f"Using scaled JCF labels from {jcf_subdir}/")
+    if clean_feats:
+        print("Clean features: pelvis translations zero-centered, dead joints removed")
 
     print(f"Found {len(subject_dirs)} subjects with JCF data")
     if len(subject_dirs) == 0:
@@ -578,7 +720,7 @@ def train(exp=None, filter_flat=True):
     print("Loading training data...")
     train_ds = JCFDataset(train_dirs, lower_body_only=lower_body,
                           with_confidence=use_confidence,
-                          jcf_subdir=jcf_subdir)
+                          jcf_subdir=jcf_subdir, clean_features=clean_feats)
     print(f"  {len(train_ds)} training sequences")
 
     # Compute global normalization stats from training data
@@ -594,7 +736,7 @@ def train(exp=None, filter_flat=True):
     print("Loading validation data...")
     val_ds = JCFDataset(val_dirs, lower_body_only=lower_body,
                         with_confidence=use_confidence,
-                        jcf_subdir=jcf_subdir)
+                        jcf_subdir=jcf_subdir, clean_features=clean_feats)
     val_ds.normalize(input_mean, input_std)
     print(f"  {len(val_ds)} validation sequences")
 
@@ -624,7 +766,8 @@ def train(exp=None, filter_flat=True):
         # Re-derive from train_dirs that successfully loaded
         loaded_prefixes = []
         for d in train_dirs:
-            result = load_subject(d, lower_body_only=lower_body, jcf_subdir=jcf_subdir)
+            result = load_subject(d, lower_body_only=lower_body, jcf_subdir=jcf_subdir,
+                                 clean_features=clean_feats)
             if result is not None:
                 loaded_prefixes.append(os.path.basename(d).split('_')[0])
         dataset_counts_loaded = {}
@@ -650,7 +793,13 @@ def train(exp=None, filter_flat=True):
     print(f"Input features per frame: {n_features}")
 
     # Create model
-    if use_transformer:
+    if use_tcn:
+        model = JCF_TCN(n_features=n_features, n_outputs=3).to(DEVICE)
+        print("Using JCF_TCN (temporal convolutional network, dilations 1-64)")
+    elif use_fft_mlp:
+        model = JCF_FFT_MLP(n_features=n_features, n_outputs=3).to(DEVICE)
+        print("Using JCF_FFT_MLP (windowed FFT features + MLP)")
+    elif use_transformer:
         model = JCF_Transformer(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_Transformer (conv stem + transformer encoder)")
     elif use_v2:
@@ -714,13 +863,63 @@ def train(exp=None, filter_flat=True):
         weight = torch.where(err > 0, tau, 1.0 - tau)
         return (weight * err ** 2 * mask.unsqueeze(-1)).sum() / (mask.sum().float() * 3)
 
+    def log_magnitude_loss(preds, labels, mask, confidence=None):
+        """Like symmetric_loss but with flattened magnitude weighting:
+        1 + log(1 + mag) instead of raw mag. Gives intermediate peaks
+        meaningful weight instead of deprioritizing them."""
+        mask_3d = mask.unsqueeze(-1)
+        n_valid = mask.sum().float() * 3
+        mse = ((preds - labels) ** 2 * mask_3d).sum() / n_valid
+        mag = torch.sqrt((labels ** 2).sum(dim=-1, keepdim=True)).detach()
+        log_mag = 1.0 + torch.log1p(mag)
+        weighted = ((preds - labels) ** 2 * log_mag * mask_3d).sum() / ((log_mag * mask_3d).sum() + 1e-8)
+        pred_grad = preds[:, 1:] - preds[:, :-1]
+        label_grad = labels[:, 1:] - labels[:, :-1]
+        grad_mask = (mask[:, 1:] & mask[:, :-1]).unsqueeze(-1)
+        grad_loss = ((pred_grad - label_grad) ** 2 * grad_mask).sum() / (grad_mask.sum().float() * 3 + 1e-8)
+        return mse + 0.5 * weighted + 0.3 * grad_loss
+
+    def log_magnitude_peak_loss(preds, labels, mask, confidence=None):
+        """Log-magnitude loss + peak matching penalty.
+        Detects local peaks in GT resultant and adds extra penalty
+        for underestimating them, regardless of peak magnitude."""
+        mask_3d = mask.unsqueeze(-1)
+        n_valid = mask.sum().float() * 3
+        mse = ((preds - labels) ** 2 * mask_3d).sum() / n_valid
+        mag = torch.sqrt((labels ** 2).sum(dim=-1, keepdim=True)).detach()
+        log_mag = 1.0 + torch.log1p(mag)
+        weighted = ((preds - labels) ** 2 * log_mag * mask_3d).sum() / ((log_mag * mask_3d).sum() + 1e-8)
+        pred_grad = preds[:, 1:] - preds[:, :-1]
+        label_grad = labels[:, 1:] - labels[:, :-1]
+        grad_mask = (mask[:, 1:] & mask[:, :-1]).unsqueeze(-1)
+        grad_loss = ((pred_grad - label_grad) ** 2 * grad_mask).sum() / (grad_mask.sum().float() * 3 + 1e-8)
+        # Peak loss: find frames where GT resultant has a local max (higher than both neighbors)
+        gt_res = mag.squeeze(-1)  # [B, T]
+        left = gt_res[:, :-2]
+        center = gt_res[:, 1:-1]
+        right = gt_res[:, 2:]
+        is_peak = (center > left) & (center > right) & mask[:, 1:-1]
+        if is_peak.any():
+            peak_preds = preds[:, 1:-1][is_peak]   # [N_peaks, 3]
+            peak_labels = labels[:, 1:-1][is_peak]  # [N_peaks, 3]
+            peak_loss = ((peak_preds - peak_labels) ** 2).mean()
+        else:
+            peak_loss = torch.tensor(0.0, device=preds.device)
+        return mse + 0.5 * weighted + 0.3 * grad_loss + 0.5 * peak_loss
+
     # Select loss based on experiment
     if EXP == 'f':
         criterion = confidence_weighted_loss
         print("Loss: confidence-weighted symmetric (MSE + magnitude + gradient)")
-    elif EXP in ('a', 'c', 'd', 'e', 'h'):
+    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm'):
         criterion = symmetric_loss
         print("Loss: symmetric (MSE + magnitude-weighted + gradient)")
+    elif EXP == 'j':
+        criterion = log_magnitude_loss
+        print("Loss: log-magnitude (flattened weighting + gradient)")
+    elif EXP == 'k':
+        criterion = log_magnitude_peak_loss
+        print("Loss: log-magnitude + peak matching")
     elif EXP == 'b':
         criterion = masked_mse
         print("Loss: MSE (log-space targets)")
@@ -745,7 +944,10 @@ def train(exp=None, filter_flat=True):
             confidence = confidence.to(DEVICE)
 
             optimizer.zero_grad()
-            preds = model(inputs, mask=mask) if use_transformer else model(inputs)
+            if use_transformer:
+                preds = model(inputs, mask=mask)
+            else:
+                preds = model(inputs)
             loss = criterion(preds, labels, mask, confidence=confidence)
             loss.backward()
             optimizer.step()
@@ -767,7 +969,10 @@ def train(exp=None, filter_flat=True):
                 mask = mask.to(DEVICE)
                 mask_3d = mask.unsqueeze(-1)
 
-                preds = model(inputs, mask=mask) if use_transformer else model(inputs)
+                if use_transformer:
+                    preds = model(inputs, mask=mask)
+                else:
+                    preds = model(inputs)
                 # Masked MSE for val
                 sq_err = (preds - labels) ** 2 * mask_3d
                 n_valid = mask.sum().float()
@@ -807,8 +1012,9 @@ def train(exp=None, filter_flat=True):
                 'input_std': input_std,
                 'log_targets': (EXP == 'b'),
                 'lower_body_only': lower_body,
-                'model_class': 'transformer' if use_transformer else ('v2' if use_v2 else 'v1'),
+                'model_class': 'tcn' if use_tcn else ('fft_mlp' if use_fft_mlp else ('transformer' if use_transformer else ('v2' if use_v2 else 'v1'))),
                 'jcf_subdir': jcf_subdir,
+                'clean_features': clean_feats,
             }, os.path.join(DATA_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
@@ -818,8 +1024,8 @@ def train(exp=None, filter_flat=True):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],
-                        help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled')
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm'],
+                        help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled, i=d+clean features, j=i+log-mag loss, k=i+log-mag+peak loss, l=TCN, m=FFT-MLP')
     parser.add_argument('--no-flat-filter', action='store_true',
                         help='Disable flat-waveform quality filter (keep all subjects)')
     args = parser.parse_args()

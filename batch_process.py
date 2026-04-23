@@ -453,10 +453,14 @@ def run_jcf(subject_dir, t0, t1):
     model_coord_names = [model.getCoordinateSet().get(i).getName()
                          for i in range(model.getCoordinateSet().getSize())]
 
+    state = model.initSystem()
+    # Collect constrained flags before addForce invalidates the system
+    constrained = [model.getCoordinateSet().get(i).isConstrained(state)
+                   for i in range(model.getCoordinateSet().getSize())]
     for i in range(model.getCoordinateSet().getSize()):
-        coord = model.getCoordinateSet().get(i)
-        if coord.isConstrained(model.initSystem()):
+        if constrained[i]:
             continue
+        coord = model.getCoordinateSet().get(i)
         reserve = osm.CoordinateActuator(coord.getName())
         reserve.setName(f"reserve_{coord.getName()}")
         if coord.getMotionType() == osm.Coordinate.Rotational:

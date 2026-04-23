@@ -16,7 +16,7 @@ import torch
 import matplotlib.pyplot as plt
 
 # Reuse data loading and model from train_cnn
-from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_Transformer
+from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_Transformer, JCF_TCN, JCF_FFT_MLP
 
 TEST_ROOT = "./jcf/testing/running"
 DEVICE = "cpu"
@@ -25,7 +25,7 @@ DEVICE = "cpu"
 def test(exp=None):
     suffix = f"_{exp}" if exp else ""
     model_name = f"best_model_{exp}.pt" if exp else "best_model.pt"
-    model_path = f"./jcf/training/running/{model_name}"
+    model_path = f"./jcf/full_duration/training/running/{model_name}"
 
     # Load checkpoint
     checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=True)
@@ -33,11 +33,16 @@ def test(exp=None):
     lower_body_only = checkpoint.get('lower_body_only', False)
     model_class = checkpoint.get('model_class', 'v1')
     jcf_subdir = checkpoint.get('jcf_subdir', 'jcf_output')
+    clean_features = checkpoint.get('clean_features', False)
     n_features = checkpoint['n_features']
     input_mean = checkpoint['input_mean']
     input_std = checkpoint['input_std']
 
-    if model_class == 'transformer':
+    if model_class == 'tcn':
+        ModelClass = JCF_TCN
+    elif model_class == 'fft_mlp':
+        ModelClass = JCF_FFT_MLP
+    elif model_class == 'transformer':
         ModelClass = JCF_Transformer
     elif model_class == 'v2':
         ModelClass = JCF_CNN_v2
@@ -51,6 +56,8 @@ def test(exp=None):
     print(f"Features: {n_features}, Device: {DEVICE}")
     if lower_body_only:
         print("Using lower-body joints only (0-19)")
+    if clean_features:
+        print("Clean features: pelvis translations zero-centered, dead joints removed")
     if jcf_subdir != 'jcf_output':
         print(f"Using JCF labels from {jcf_subdir}/")
 
@@ -73,7 +80,7 @@ def test(exp=None):
     all_results = []
     for subj_name, subj_dir in subject_dirs:
         result = load_subject(subj_dir, lower_body_only=lower_body_only,
-                             jcf_subdir=jcf_subdir)
+                             jcf_subdir=jcf_subdir, clean_features=clean_features)
         if result is None:
             print(f"  {subj_name}: SKIP (missing files)")
             continue
@@ -273,6 +280,6 @@ def test(exp=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm'])
     args = parser.parse_args()
     test(exp=args.exp)
