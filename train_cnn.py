@@ -38,9 +38,10 @@ from sklearn.model_selection import train_test_split
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
+SEED = 42
 DATA_ROOT = "./jcf/full_duration/training/running"
 BATCH_SIZE = 8          # full sequences per batch (pad to max length)
-EPOCHS = 200
+EPOCHS = 300
 LEARNING_RATE = 1e-3
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TRAIN_SPLIT = 0.8       # 80% train, 20% val (by subject)
@@ -168,7 +169,8 @@ def load_sto(path, skiprows=11):
 
 
 def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
-                 jcf_subdir='jcf_output', clean_features=False):
+                 jcf_subdir='jcf_output', clean_features=False, include_mass=False,
+                 use_root_features=False, combine_root_features=False):
     """
     Load one subject's data. Returns (inputs, labels, mass) or None.
 
@@ -177,6 +179,8 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
 
     clean_features: if True, zero-center pelvis translations per trial
                     and remove dead joints (subtalar, mtp).
+    use_root_features: if True, use root-frame features from .b3d instead
+                       of IK-derived features. Requires root_features.npy.
     """
     ik_path = os.path.join(subject_dir, 'ik_results.mot')
     grf_path = os.path.join(subject_dir, 'grf_data.mot')
@@ -255,8 +259,41 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
         ik_vel = ik_vel[:, keep]
         ik_acc = ik_acc[:, keep]
 
-    # Concatenate inputs: [positions, velocities, accelerations, GRF, GRF_vel]
-    inputs = np.hstack([ik_interp, ik_vel, ik_acc, grf_interp, grf_vel])
+    # Build input features
+    if use_root_features:
+        root_path = os.path.join(subject_dir, 'root_features.npy')
+        if not os.path.exists(root_path):
+            return None
+        root_data = np.load(root_path)  # [T_b3d, 81]
+        # root_data has same frame count as IK; interpolate to JCF timestamps
+        root_time = ik_time[:len(root_data)]
+        root_interp = np.column_stack([
+            np.interp(t_common, root_time, root_data[:, j])
+            for j in range(root_data.shape[1])
+        ])
+        # Normalize GRF-in-root-frame columns (last 6 before COM acc) by BW
+        # Layout: joint_centers(60) + root_dynamics(12) + grf_root(6) + com_acc(3) = 81
+        root_interp[:, 72:78] /= BW
+        parts = [root_interp]
+    else:
+        parts = [ik_interp, ik_vel, ik_acc, grf_interp, grf_vel]
+    if combine_root_features:
+        root_path = os.path.join(subject_dir, 'root_features.npy')
+        if not os.path.exists(root_path):
+            return None
+        root_data = np.load(root_path)
+        root_time = ik_time[:len(root_data)]
+        # Only take root dynamics (60:81): root vel/acc (12) + GRF in root frame (6) + COM acc (3)
+        root_dyn = root_data[:, 60:]
+        root_dyn_interp = np.column_stack([
+            np.interp(t_common, root_time, root_dyn[:, j])
+            for j in range(root_dyn.shape[1])
+        ])
+        root_dyn_interp[:, 12:18] /= BW  # GRF-in-root-frame columns
+        parts.append(root_dyn_interp)
+    if include_mass:
+        parts.append(np.full((len(t_common), 1), mass))
+    inputs = np.hstack(parts)
 
     if with_confidence:
         conf = load_confidence_weights(subject_dir)
@@ -276,14 +313,18 @@ class JCFDataset(Dataset):
     """Full-sequence dataset. Each item is one subject's entire trial."""
 
     def __init__(self, subject_dirs, lower_body_only=False, with_confidence=False,
-                 jcf_subdir='jcf_output', clean_features=False):
+                 jcf_subdir='jcf_output', clean_features=False, include_mass=False,
+                 use_root_features=False, combine_root_features=False):
         self.sequences = []  # list of (inputs, labels, length) or (inputs, labels, length, confidence)
         self.has_confidence = with_confidence
 
         for subj_dir in subject_dirs:
             result = load_subject(subj_dir, lower_body_only=lower_body_only,
                                  with_confidence=with_confidence,
-                                 jcf_subdir=jcf_subdir, clean_features=clean_features)
+                                 jcf_subdir=jcf_subdir, clean_features=clean_features,
+                                 include_mass=include_mass,
+                                 use_root_features=use_root_features,
+                                 combine_root_features=combine_root_features)
             if result is None:
                 continue
             if with_confidence:
@@ -367,16 +408,21 @@ def collate_fn(batch):
 
 class ResBlock1d(nn.Module):
     """Residual block with dilated conv + GroupNorm."""
-    def __init__(self, channels, kernel_size=5, dilation=1):
+    def __init__(self, channels, kernel_size=5, dilation=1, dropout=0.0):
         super().__init__()
         padding = (kernel_size - 1) * dilation // 2
-        self.block = nn.Sequential(
+        layers = [
             nn.Conv1d(channels, channels, kernel_size, padding=padding, dilation=dilation),
             nn.GroupNorm(8, channels),
             nn.ReLU(),
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        layers += [
             nn.Conv1d(channels, channels, kernel_size, padding=padding, dilation=dilation),
             nn.GroupNorm(8, channels),
-        )
+        ]
+        self.block = nn.Sequential(*layers)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -469,6 +515,41 @@ class JCF_CNN_v2(nn.Module):
         x = self.res_blocks(x)     # → [batch, 128, seq_len]
         x = self.head(x)           # → [batch, 3, seq_len]
         x = x.permute(0, 2, 1)    # → [batch, seq_len, 3]
+        return x
+
+
+class JCF_CNN_v3(nn.Module):
+    """Wider CNN with more residual blocks and dropout for higher-dimensional input."""
+
+    def __init__(self, n_features=43, n_outputs=3, dropout=0.15):
+        super().__init__()
+        self.input_proj = nn.Sequential(
+            nn.Conv1d(n_features, 256, kernel_size=7, padding=3),
+            nn.GroupNorm(8, 256),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.res_blocks = nn.Sequential(
+            ResBlock1d(256, kernel_size=5, dilation=1, dropout=dropout),
+            ResBlock1d(256, kernel_size=5, dilation=2, dropout=dropout),
+            ResBlock1d(256, kernel_size=5, dilation=4, dropout=dropout),
+            ResBlock1d(256, kernel_size=5, dilation=8, dropout=dropout),
+            ResBlock1d(256, kernel_size=5, dilation=16, dropout=dropout),
+            ResBlock1d(256, kernel_size=5, dilation=1, dropout=dropout),
+        )
+        self.head = nn.Sequential(
+            nn.Conv1d(256, 128, kernel_size=1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(128, n_outputs, kernel_size=1),
+        )
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = self.input_proj(x)
+        x = self.res_blocks(x)
+        x = self.head(x)
+        x = x.permute(0, 2, 1)
         return x
 
 
@@ -665,16 +746,22 @@ class JCF_Transformer(nn.Module):
 # ─── Training ─────────────────────────────────────────────────────────────────
 
 def train(exp=None, filter_flat=True):
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
     EXP = exp
-    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm')
-    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k')
+    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p')
+    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k', 'n', 'o')
+    use_v3 = EXP == 'p'
     use_transformer = EXP == 'h'
     use_tcn = EXP == 'l'
     use_fft_mlp = EXP == 'm'
-    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm')
+    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p')
     clean_only = EXP == 'e'
     use_confidence = EXP == 'f'
-    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm')
+    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p')
+    mass_input = EXP in ('l', 'n', 'o', 'p')
+    root_feats = EXP == 'o'
+    combine_root = EXP == 'p'
     scaled_labels = EXP in ('g', 'h')  # use 2x muscle-scaled SO labels
     # Find all subjects with JCF output
     jcf_subdir = 'jcf_output_2x' if scaled_labels else 'jcf_output'
@@ -720,7 +807,9 @@ def train(exp=None, filter_flat=True):
     print("Loading training data...")
     train_ds = JCFDataset(train_dirs, lower_body_only=lower_body,
                           with_confidence=use_confidence,
-                          jcf_subdir=jcf_subdir, clean_features=clean_feats)
+                          jcf_subdir=jcf_subdir, clean_features=clean_feats,
+                          include_mass=mass_input, use_root_features=root_feats,
+                          combine_root_features=combine_root)
     print(f"  {len(train_ds)} training sequences")
 
     # Compute global normalization stats from training data
@@ -736,7 +825,9 @@ def train(exp=None, filter_flat=True):
     print("Loading validation data...")
     val_ds = JCFDataset(val_dirs, lower_body_only=lower_body,
                         with_confidence=use_confidence,
-                        jcf_subdir=jcf_subdir, clean_features=clean_feats)
+                        jcf_subdir=jcf_subdir, clean_features=clean_feats,
+                        include_mass=mass_input, use_root_features=root_feats,
+                        combine_root_features=combine_root)
     val_ds.normalize(input_mean, input_std)
     print(f"  {len(val_ds)} validation sequences")
 
@@ -767,7 +858,9 @@ def train(exp=None, filter_flat=True):
         loaded_prefixes = []
         for d in train_dirs:
             result = load_subject(d, lower_body_only=lower_body, jcf_subdir=jcf_subdir,
-                                 clean_features=clean_feats)
+                                 clean_features=clean_feats, include_mass=mass_input,
+                                 use_root_features=root_feats,
+                                 combine_root_features=combine_root)
             if result is not None:
                 loaded_prefixes.append(os.path.basename(d).split('_')[0])
         dataset_counts_loaded = {}
@@ -802,6 +895,9 @@ def train(exp=None, filter_flat=True):
     elif use_transformer:
         model = JCF_Transformer(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_Transformer (conv stem + transformer encoder)")
+    elif use_v3:
+        model = JCF_CNN_v3(n_features=n_features, n_outputs=3).to(DEVICE)
+        print("Using JCF_CNN_v3 (256ch, 6 res blocks, dropout 0.15)")
     elif use_v2:
         model = JCF_CNN_v2(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_CNN_v2 (residual blocks, wider)")
@@ -911,7 +1007,7 @@ def train(exp=None, filter_flat=True):
     if EXP == 'f':
         criterion = confidence_weighted_loss
         print("Loss: confidence-weighted symmetric (MSE + magnitude + gradient)")
-    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm'):
+    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p'):
         criterion = symmetric_loss
         print("Loss: symmetric (MSE + magnitude-weighted + gradient)")
     elif EXP == 'j':
@@ -1012,9 +1108,12 @@ def train(exp=None, filter_flat=True):
                 'input_std': input_std,
                 'log_targets': (EXP == 'b'),
                 'lower_body_only': lower_body,
-                'model_class': 'tcn' if use_tcn else ('fft_mlp' if use_fft_mlp else ('transformer' if use_transformer else ('v2' if use_v2 else 'v1'))),
+                'model_class': 'tcn' if use_tcn else ('fft_mlp' if use_fft_mlp else ('transformer' if use_transformer else ('v3' if use_v3 else ('v2' if use_v2 else 'v1')))),
                 'jcf_subdir': jcf_subdir,
                 'clean_features': clean_feats,
+                'include_mass': mass_input,
+                'use_root_features': root_feats,
+                'combine_root_features': combine_root,
             }, os.path.join(DATA_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
@@ -1024,8 +1123,8 @@ def train(exp=None, filter_flat=True):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm'],
-                        help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled, i=d+clean features, j=i+log-mag loss, k=i+log-mag+peak loss, l=TCN, m=FFT-MLP')
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'],
+                        help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled, i=d+clean features, j=i+log-mag loss, k=i+log-mag+peak loss, l=TCN, m=FFT-MLP, n=i+body mass, o=root-frame features')
     parser.add_argument('--no-flat-filter', action='store_true',
                         help='Disable flat-waveform quality filter (keep all subjects)')
     args = parser.parse_args()

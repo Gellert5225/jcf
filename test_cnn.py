@@ -16,7 +16,7 @@ import torch
 import matplotlib.pyplot as plt
 
 # Reuse data loading and model from train_cnn
-from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_Transformer, JCF_TCN, JCF_FFT_MLP
+from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_CNN_v3, JCF_Transformer, JCF_TCN, JCF_FFT_MLP
 
 TEST_ROOT = "./jcf/testing/running"
 DEVICE = "cpu"
@@ -34,6 +34,9 @@ def test(exp=None):
     model_class = checkpoint.get('model_class', 'v1')
     jcf_subdir = checkpoint.get('jcf_subdir', 'jcf_output')
     clean_features = checkpoint.get('clean_features', False)
+    include_mass = checkpoint.get('include_mass', False)
+    use_root_features = checkpoint.get('use_root_features', False)
+    combine_root_features = checkpoint.get('combine_root_features', False)
     n_features = checkpoint['n_features']
     input_mean = checkpoint['input_mean']
     input_std = checkpoint['input_std']
@@ -44,6 +47,8 @@ def test(exp=None):
         ModelClass = JCF_FFT_MLP
     elif model_class == 'transformer':
         ModelClass = JCF_Transformer
+    elif model_class == 'v3':
+        ModelClass = JCF_CNN_v3
     elif model_class == 'v2':
         ModelClass = JCF_CNN_v2
     else:
@@ -58,6 +63,12 @@ def test(exp=None):
         print("Using lower-body joints only (0-19)")
     if clean_features:
         print("Clean features: pelvis translations zero-centered, dead joints removed")
+    if include_mass:
+        print("Body mass included as input feature")
+    if use_root_features:
+        print("Using root-frame features from .b3d (joint centers, root dynamics, GRF in root frame)")
+    if combine_root_features:
+        print("Combining IK features with root-frame dynamics from .b3d")
     if jcf_subdir != 'jcf_output':
         print(f"Using JCF labels from {jcf_subdir}/")
 
@@ -80,7 +91,10 @@ def test(exp=None):
     all_results = []
     for subj_name, subj_dir in subject_dirs:
         result = load_subject(subj_dir, lower_body_only=lower_body_only,
-                             jcf_subdir=jcf_subdir, clean_features=clean_features)
+                             jcf_subdir=jcf_subdir, clean_features=clean_features,
+                             include_mass=include_mass,
+                             use_root_features=use_root_features,
+                             combine_root_features=combine_root_features)
         if result is None:
             print(f"  {subj_name}: SKIP (missing files)")
             continue
@@ -280,6 +294,6 @@ def test(exp=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm'])
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'])
     args = parser.parse_args()
     test(exp=args.exp)

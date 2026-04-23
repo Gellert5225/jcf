@@ -97,6 +97,9 @@ def main():
     parser.add_argument('--split', type=str, default='training',
                         choices=['training', 'testing', 'both'],
                         help='Which data split to process (default: training)')
+    parser.add_argument('--activity', type=str, default='running',
+                        choices=['running', 'walking'],
+                        help='Activity type to process (default: running)')
     args = parser.parse_args()
 
     n_workers = args.workers
@@ -109,19 +112,20 @@ def main():
         n_workers = max(1, n_cores // threads)
 
     splits = ['training', 'testing'] if args.split == 'both' else [args.split]
+    activity = args.activity
+    is_running = activity == 'running'
 
     for split in splits:
         out = _configure_paths(split)
-        out_running = batch_process.OUTPUT_ROOT_RUNNING
+        out_activity = batch_process.OUTPUT_ROOT_RUNNING if is_running else batch_process.OUTPUT_ROOT_WALKING
         os.makedirs(out, exist_ok=True)
-        os.makedirs(out_running, exist_ok=True)
-        os.makedirs(batch_process.OUTPUT_ROOT_WALKING, exist_ok=True)
+        os.makedirs(out_activity, exist_ok=True)
 
         # ── Phase 1: Scan all b3d files to build segment list ────────────
         print(f"\n{'=' * 60}")
-        print(f"Split: {split}")
+        print(f"Split: {split}  |  Activity: {activity}")
         print(f"Input:  {batch_process.B3D_ROOT}")
-        print(f"Output: {out}")
+        print(f"Output: {out_activity}")
         print(f"Workers: {n_workers}")
         print(f"\nPhase 1: Scanning b3d files for segments...")
         print("=" * 60)
@@ -167,14 +171,14 @@ def main():
                 trial_run_counts[t] = trial_run_counts.get(t, 0) + 1
 
             trial_run_seen = {}
-            n_running = 0
+            n_matched = 0
             for seg in segments:
                 t = seg['trial']
                 run_idx = trial_run_seen.get(t, 0)
                 trial_run_seen[t] = run_idx + 1
 
-                # Skip walking
-                if seg['peak_foot_grf_bw'] <= GRF_CAP_WALKING:
+                seg_is_running = seg['peak_foot_grf_bw'] > GRF_CAP_WALKING
+                if seg_is_running != is_running:
                     continue
 
                 if trial_run_counts[t] == 1:
@@ -183,12 +187,12 @@ def main():
                     seg_name = f"{output_name}_t{t:02d}_r{run_idx:02d}"
 
                 segment_args.append((
-                    seg_name, b3d_path, out_running,
+                    seg_name, b3d_path, out_activity,
                     seg['trial'], seg['start_frame'], seg['num_frames'],
                 ))
-                n_running += 1
+                n_matched += 1
 
-            print(f" {n_running} running segments ({len(segments)} total)", flush=True)
+            print(f" {n_matched} {activity} segments ({len(segments)} total)", flush=True)
 
         scan_time = time.time() - t_scan
         total_segs = len(segment_args)
@@ -201,7 +205,7 @@ def main():
         )
 
         print(f"\nScan complete in {scan_time:.0f}s")
-        print(f"  Total running segments: {total_segs}")
+        print(f"  Total {activity} segments: {total_segs}")
         print(f"  Already done:           {n_already_done}")
         print(f"  To process:             {total_segs - n_already_done}")
         print(f"  Scan failures:          {len(scan_fails)}")
