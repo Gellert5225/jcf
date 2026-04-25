@@ -16,14 +16,16 @@ import torch
 import matplotlib.pyplot as plt
 
 # Reuse data loading and model from train_cnn
-from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_CNN_v3, JCF_Transformer, JCF_TCN, JCF_FFT_MLP
+from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_CNN_v2_causal, JCF_CNN_v3, JCF_Transformer, JCF_TCN, JCF_FFT_MLP
 
-TEST_ROOT = "./jcf/testing/running"
+TEST_ROOT = "./jcf/full_duration/testing/running"
 DEVICE = "cpu"
 
 
-def test(exp=None):
+def test(exp=None, calibrate_peaks=0):
     suffix = f"_{exp}" if exp else ""
+    if calibrate_peaks > 0:
+        suffix += f"_cal{calibrate_peaks}"
     model_name = f"best_model_{exp}.pt" if exp else "best_model.pt"
     model_path = f"./jcf/full_duration/training/running/{model_name}"
 
@@ -37,6 +39,7 @@ def test(exp=None):
     include_mass = checkpoint.get('include_mass', False)
     use_root_features = checkpoint.get('use_root_features', False)
     combine_root_features = checkpoint.get('combine_root_features', False)
+    lookahead = checkpoint.get('lookahead', 0)
     n_features = checkpoint['n_features']
     input_mean = checkpoint['input_mean']
     input_std = checkpoint['input_std']
@@ -49,6 +52,8 @@ def test(exp=None):
         ModelClass = JCF_Transformer
     elif model_class == 'v3':
         ModelClass = JCF_CNN_v3
+    elif model_class == 'v2_causal':
+        ModelClass = JCF_CNN_v2_causal
     elif model_class == 'v2':
         ModelClass = JCF_CNN_v2
     else:
@@ -69,6 +74,8 @@ def test(exp=None):
         print("Using root-frame features from .b3d (joint centers, root dynamics, GRF in root frame)")
     if combine_root_features:
         print("Combining IK features with root-frame dynamics from .b3d")
+    if lookahead > 0:
+        print(f"Lookahead: {lookahead} frames ({lookahead*10}ms latency at 100Hz)")
     if jcf_subdir != 'jcf_output':
         print(f"Using JCF labels from {jcf_subdir}/")
 
@@ -115,7 +122,44 @@ def test(exp=None):
         if log_targets:
             preds = np.sign(preds) * (np.exp(np.abs(preds)) - 1)
 
+        # Apply lookahead shift: model's output[t] predicts label[t-N], so align
+        # preds[N:] with labels[:T-N]. The last N label frames have no prediction.
+        if lookahead > 0:
+            if T <= lookahead + 30:
+                print(f"  {subj_name}: SKIP (too short for lookahead={lookahead})")
+                continue
+            preds = preds[lookahead:]
+            labels = labels[:-lookahead]
+            T = T - lookahead
+
+        # Subject-specific calibration: fit a scalar using the first N GT peaks.
+        # Simulates measuring a few reference cycles per subject before deployment.
+        if calibrate_peaks > 0:
+            from scipy.signal import find_peaks as _find_peaks
+            gt_res = np.sqrt((labels ** 2).sum(axis=1))
+            pred_res = np.sqrt((preds ** 2).sum(axis=1))
+            gt_peak_idx, _ = _find_peaks(gt_res, height=0.5, distance=15)
+            if len(gt_peak_idx) >= calibrate_peaks:
+                cal_idx = gt_peak_idx[:calibrate_peaks]
+                # Per-peak ratio then mean (robust to a single bad peak)
+                ratios = gt_res[cal_idx] / (pred_res[cal_idx] + 1e-8)
+                scale = np.mean(ratios)
+                preds = preds * scale
+                # Exclude calibration region from evaluation
+                cal_end = cal_idx[-1] + 15
+            else:
+                scale = 1.0
+                cal_end = 0
+        else:
+            scale = 1.0
+            cal_end = 0
+
         valid = np.ones(T, dtype=bool)
+        if calibrate_peaks > 0 and cal_end > 0:
+            valid[:cal_end] = False  # don't score on calibration frames
+        if valid.sum() < 30:
+            print(f"  {subj_name}: SKIP (only {valid.sum()} frames after calibration)")
+            continue
 
         # Metrics (in BW)
         errors = preds[valid] - labels[valid]
@@ -144,6 +188,7 @@ def test(exp=None):
 
         all_results.append({
             'name': subj_name,
+            'dir': subj_dir,
             'T': T,
             'mass': mass,
             'labels': labels,
@@ -151,66 +196,32 @@ def test(exp=None):
             'valid': valid,
         })
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
-    n_subjects = len(all_results)
-    fig, axes = plt.subplots(n_subjects, 4, figsize=(28, 5 * n_subjects),
-                             squeeze=False)
-
-    for i, res in enumerate(all_results):
+    # ── Per-subject plots (saved in each subject's folder) ─────────────────
+    for res in all_results:
         labels = res['labels']
         preds = res['preds']
         valid = res['valid']
         T = res['T']
-        time = np.arange(T) * 0.01  # 100 Hz
+        time = np.arange(T) * 0.01
 
-        # Col 0: Fx
-        ax = axes[i, 0]
-        ax.plot(time[valid], labels[valid, 0], 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], preds[valid, 0], 'r--', linewidth=1.5, label='Predicted')
-        ax.set_ylabel('Fx (BW)')
-        ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Fx')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # Col 1: Fy (axial)
-        ax = axes[i, 1]
-        ax.plot(time[valid], labels[valid, 1], 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], preds[valid, 1], 'r--', linewidth=1.5, label='Predicted')
-        ax.set_ylabel('Fy (BW)')
-        ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Fy')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # Col 2: Fz
-        ax = axes[i, 2]
-        ax.plot(time[valid], labels[valid, 2], 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], preds[valid, 2], 'r--', linewidth=1.5, label='Predicted')
-        ax.set_ylabel('Fz (BW)')
-        ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Fz')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # Col 3: Resultant
-        ax = axes[i, 3]
         gt_res = np.sqrt(np.sum(labels[valid]**2, axis=1))
         pred_res = np.sqrt(np.sum(preds[valid]**2, axis=1))
-        ax.plot(time[valid], gt_res, 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], pred_res, 'r--', linewidth=1.5, label='Predicted')
-        ax.axhspan(2.5, 3.5, alpha=0.1, color='green', label='Expected peak range')
+
+        fig, ax = plt.subplots(figsize=(14, 5))
+        ax.plot(time[valid], gt_res, 'b-', lw=1.5, label='GT')
+        ax.plot(time[valid], pred_res, 'r--', lw=1.5, label='Pred')
         ax.set_ylabel('Resultant JCF (BW)')
         ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Resultant JCF')
+        ax.set_title(f'{res["name"]} — Resultant')
         ax.legend()
         ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    out_path = os.path.join(TEST_ROOT, f'test_results{suffix}.png')
-    plt.savefig(out_path, dpi=150)
-    print(f"\nPlot saved to {out_path}")
-    plt.close()
+        plt.tight_layout()
+        fig_path = os.path.join(res['dir'], f'prediction{suffix}.png')
+        plt.savefig(fig_path, dpi=120)
+        plt.close()
+
+    print(f"\nPer-subject plots saved ({len(all_results)} subjects)")
 
     # ── Write GT vs Predicted to text file ────────────────────────────────────
     txt_path = os.path.join(TEST_ROOT, f'test_results{suffix}.txt')
@@ -294,6 +305,8 @@ def test(exp=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'])
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't'])
+    parser.add_argument('--calibrate', type=int, default=0,
+                        help='Use first N GT peaks to compute a per-subject scale factor. 0=disabled.')
     args = parser.parse_args()
-    test(exp=args.exp)
+    test(exp=args.exp, calibrate_peaks=args.calibrate)

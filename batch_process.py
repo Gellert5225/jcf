@@ -338,6 +338,10 @@ def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION):
     segments = []
 
     for trial in range(subject.getNumTrials()):
+        trial_name = subject.getTrialName(trial)
+        if 'static' in trial_name.lower():
+            continue  # skip static posture trials (Carter: Static_1, Han: YYYYMMDD_static_1)
+
         trial_len = subject.getTrialLength(trial)
         trial_passes = subject.getTrialNumProcessingPasses(trial)
         if trial_passes < 2 or trial_len < 10:
@@ -395,7 +399,14 @@ def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION):
             total_vy = vy_r + vy_l
             mean_grf = np.mean(total_vy)
             if mean_grf < 0.3 * BW:
-                continue  # not enough loading — static or swing
+                continue  # not enough loading — swing
+
+            # Static filter: gait alternates foot loading, so per-foot GRF
+            # should vary substantially. Static standing gives near-zero std.
+            # Threshold 0.1*BW cleanly separates static (~0) from walking (>0.3*BW).
+            foot_std = max(np.std(vy_r), np.std(vy_l))
+            if foot_std < 0.1 * BW:
+                continue  # static — no alternating foot loading
 
             peak_foot = max(np.max(vy_r), np.max(vy_l))
             duration = rl * dt

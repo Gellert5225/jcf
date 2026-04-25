@@ -218,6 +218,11 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
     fz = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fz'].values
     jcf_data = np.column_stack([fx, fy, fz]) / BW  # normalize by BW
 
+    # Filter out subjects with unreasonable JCF (bad SO output)
+    peak_resultant = np.sqrt((jcf_data ** 2).sum(axis=1)).max()
+    if peak_resultant > 10.0:
+        return None
+
     # Align by time: find overlapping time range
     t_start = max(ik_time[0], grf_time[0], jcf_time[0])
     t_end = min(ik_time[-1], grf_time[-1], jcf_time[-1])
@@ -429,6 +434,51 @@ class ResBlock1d(nn.Module):
         return self.relu(x + self.block(x))
 
 
+class CausalConv1d(nn.Module):
+    """Conv1d with left-only (causal) padding — output[t] only sees input[<=t]."""
+    def __init__(self, in_ch, out_ch, kernel_size, dilation=1):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size, padding=0, dilation=dilation)
+
+    def forward(self, x):
+        x = nn.functional.pad(x, (self.pad, 0))
+        return self.conv(x)
+
+
+class ChannelLayerNorm(nn.Module):
+    """LayerNorm over channels at each timestep. Preserves causality
+    (GroupNorm would normalize across time and leak future into past)."""
+    def __init__(self, num_channels):
+        super().__init__()
+        self.norm = nn.LayerNorm(num_channels)
+
+    def forward(self, x):  # x: [N, C, T]
+        return self.norm(x.transpose(1, 2)).transpose(1, 2)
+
+
+class CausalResBlock1d(nn.Module):
+    """Residual block with causal dilated conv + per-timestep channel norm."""
+    def __init__(self, channels, kernel_size=5, dilation=1, dropout=0.0):
+        super().__init__()
+        layers = [
+            CausalConv1d(channels, channels, kernel_size, dilation=dilation),
+            ChannelLayerNorm(channels),
+            nn.ReLU(),
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        layers += [
+            CausalConv1d(channels, channels, kernel_size, dilation=dilation),
+            ChannelLayerNorm(channels),
+        ]
+        self.block = nn.Sequential(*layers)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        return self.relu(x + self.block(x))
+
+
 class JCF_CNN(nn.Module):
     """
     1D CNN for predicting knee JCF from kinematics + GRF.
@@ -515,6 +565,41 @@ class JCF_CNN_v2(nn.Module):
         x = self.res_blocks(x)     # → [batch, 128, seq_len]
         x = self.head(x)           # → [batch, 3, seq_len]
         x = x.permute(0, 2, 1)    # → [batch, seq_len, 3]
+        return x
+
+
+class JCF_CNN_v2_causal(nn.Module):
+    """
+    Causal variant of v2: each frame only sees past frames.
+    For online/streaming inference at 1000Hz.
+    Receptive field ≈ 4*(5-1)*(1+2+4+8) = 240 frames lookback.
+    """
+
+    def __init__(self, n_features=43, n_outputs=3):
+        super().__init__()
+        self.input_proj = nn.Sequential(
+            CausalConv1d(n_features, 128, kernel_size=7),
+            ChannelLayerNorm(128),
+            nn.ReLU(),
+        )
+        self.res_blocks = nn.Sequential(
+            CausalResBlock1d(128, kernel_size=5, dilation=1),
+            CausalResBlock1d(128, kernel_size=5, dilation=2),
+            CausalResBlock1d(128, kernel_size=5, dilation=4),
+            CausalResBlock1d(128, kernel_size=5, dilation=8),
+        )
+        self.head = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(64, n_outputs, kernel_size=1),
+        )
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = self.input_proj(x)
+        x = self.res_blocks(x)
+        x = self.head(x)
+        x = x.permute(0, 2, 1)
         return x
 
 
@@ -749,19 +834,21 @@ def train(exp=None, filter_flat=True):
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     EXP = exp
-    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p')
-    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k', 'n', 'o')
-    use_v3 = EXP == 'p'
+    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't')
+    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k', 'n', 'o', 'p', 'q')
+    use_v2_causal = EXP in ('r', 's', 't')
+    use_v3 = False
     use_transformer = EXP == 'h'
     use_tcn = EXP == 'l'
     use_fft_mlp = EXP == 'm'
-    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p')
+    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't')
     clean_only = EXP == 'e'
     use_confidence = EXP == 'f'
-    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p')
-    mass_input = EXP in ('l', 'n', 'o', 'p')
+    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't')
+    mass_input = EXP in ('l', 'n', 'o', 'p', 'q', 'r', 's', 't')
     root_feats = EXP == 'o'
     combine_root = EXP == 'p'
+    lookahead = 10 if EXP in ('s', 't') else 0
     scaled_labels = EXP in ('g', 'h')  # use 2x muscle-scaled SO labels
     # Find all subjects with JCF output
     jcf_subdir = 'jcf_output_2x' if scaled_labels else 'jcf_output'
@@ -898,6 +985,9 @@ def train(exp=None, filter_flat=True):
     elif use_v3:
         model = JCF_CNN_v3(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_CNN_v3 (256ch, 6 res blocks, dropout 0.15)")
+    elif use_v2_causal:
+        model = JCF_CNN_v2_causal(n_features=n_features, n_outputs=3).to(DEVICE)
+        print("Using JCF_CNN_v2_causal (causal residual blocks — online/streaming)")
     elif use_v2:
         model = JCF_CNN_v2(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_CNN_v2 (residual blocks, wider)")
@@ -1003,11 +1093,53 @@ def train(exp=None, filter_flat=True):
             peak_loss = torch.tensor(0.0, device=preds.device)
         return mse + 0.5 * weighted + 0.3 * grad_loss + 0.5 * peak_loss
 
+    def asymmetric_magnitude_loss(preds, labels, mask, confidence=None):
+        """MSE + magnitude-weighted MSE with asymmetric underprediction penalty.
+        At high GT magnitudes, underpredicting costs ~3x more than overpredicting."""
+        mask_3d = mask.unsqueeze(-1)
+        n_valid = mask.sum().float() * 3
+        mse = ((preds - labels) ** 2 * mask_3d).sum() / n_valid
+        mag = torch.sqrt((labels ** 2).sum(dim=-1, keepdim=True)).detach()
+        pred_mag = torch.sqrt((preds ** 2).sum(dim=-1, keepdim=True)).detach()
+        underpred = (pred_mag < mag).float()
+        asym_weight = mag * (1.0 + 2.0 * underpred * mag)
+        weighted = ((preds - labels) ** 2 * asym_weight * mask_3d).sum() / ((asym_weight * mask_3d).sum() + 1e-8)
+        pred_grad = preds[:, 1:] - preds[:, :-1]
+        label_grad = labels[:, 1:] - labels[:, :-1]
+        grad_mask = (mask[:, 1:] & mask[:, :-1]).unsqueeze(-1)
+        grad_loss = ((pred_grad - label_grad) ** 2 * grad_mask).sum() / (grad_mask.sum().float() * 3 + 1e-8)
+        return mse + 0.5 * weighted + 0.3 * grad_loss
+
+    def asymmetric_linear_loss(preds, labels, mask, confidence=None):
+        """Asymmetric magnitude-aware loss with linear scaling (not quadratic like Q).
+        Selectively penalizes underprediction at high peaks without blanket upward bias."""
+        mask_3d = mask.unsqueeze(-1)
+        n_valid = mask.sum().float() * 3
+        mse = ((preds - labels) ** 2 * mask_3d).sum() / n_valid
+        mag = torch.sqrt((labels ** 2).sum(dim=-1, keepdim=True)).detach()
+        pred_mag = torch.sqrt((preds ** 2).sum(dim=-1, keepdim=True)).detach()
+        underpred = (pred_mag < mag).float()
+        # Linear: 1 at low mag (no bias), grows with mag only for underpredictions
+        # mag=4, underpred: weight=5.  mag=4, overpred: weight=1.  mag=0.5: weight≈1.
+        asym_weight = 1.0 + 1.0 * underpred * mag
+        weighted = ((preds - labels) ** 2 * asym_weight * mask_3d).sum() / ((asym_weight * mask_3d).sum() + 1e-8)
+        pred_grad = preds[:, 1:] - preds[:, :-1]
+        label_grad = labels[:, 1:] - labels[:, :-1]
+        grad_mask = (mask[:, 1:] & mask[:, :-1]).unsqueeze(-1)
+        grad_loss = ((pred_grad - label_grad) ** 2 * grad_mask).sum() / (grad_mask.sum().float() * 3 + 1e-8)
+        return mse + 0.5 * weighted + 0.3 * grad_loss
+
     # Select loss based on experiment
     if EXP == 'f':
         criterion = confidence_weighted_loss
         print("Loss: confidence-weighted symmetric (MSE + magnitude + gradient)")
-    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p'):
+    elif EXP == 'q':
+        criterion = asymmetric_magnitude_loss
+        print("Loss: asymmetric magnitude (underprediction penalized ~3x at high forces)")
+    elif EXP in ('r', 's'):
+        criterion = asymmetric_linear_loss
+        print("Loss: asymmetric linear (underprediction weight grows linearly with mag)")
+    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p', 't'):
         criterion = symmetric_loss
         print("Loss: symmetric (MSE + magnitude-weighted + gradient)")
     elif EXP == 'j':
@@ -1022,6 +1154,20 @@ def train(exp=None, filter_flat=True):
     else:
         criterion = lambda p, l, m, confidence=None: expectile_loss(p, l, m, tau=0.7)
         print("Loss: expectile (tau=0.7)")
+
+    if lookahead > 0:
+        # Delayed-causal: output[t] predicts label[t-lookahead], so model uses
+        # inputs up to time t to predict the target at time t-N.
+        # At deployment this means N-frame latency with N-frame lookahead context.
+        _inner = criterion
+        def _lookahead_wrap(preds, labels, mask, confidence=None):
+            p = preds[:, lookahead:]
+            l = labels[:, :-lookahead]
+            m = mask[:, :-lookahead]
+            c = confidence[:, :-lookahead] if confidence is not None else None
+            return _inner(p, l, m, confidence=c)
+        criterion = _lookahead_wrap
+        print(f"Lookahead: {lookahead} frames ({lookahead*10}ms at 100Hz)")
 
     best_val_loss = float('inf')
 
@@ -1069,16 +1215,23 @@ def train(exp=None, filter_flat=True):
                     preds = model(inputs, mask=mask)
                 else:
                     preds = model(inputs)
-                # Masked MSE for val
-                sq_err = (preds - labels) ** 2 * mask_3d
-                n_valid = mask.sum().float()
+                # Apply lookahead shift for val too (same semantics as training loss)
+                if lookahead > 0:
+                    preds_v = preds[:, lookahead:]
+                    labels_v = labels[:, :-lookahead]
+                    mask_v = mask[:, :-lookahead]
+                else:
+                    preds_v, labels_v, mask_v = preds, labels, mask
+                mask_v_3d = mask_v.unsqueeze(-1)
+                sq_err = (preds_v - labels_v) ** 2 * mask_v_3d
+                n_valid = mask_v.sum().float()
                 loss = sq_err.sum() / (n_valid * 3)
                 batch_frames = n_valid.item()
                 val_loss += loss.item() * batch_frames
                 val_frames += batch_frames
 
                 # Fy (axial) MAE in BW (masked)
-                fy_err = (torch.abs(preds[:, :, 1] - labels[:, :, 1]) * mask).sum() / n_valid
+                fy_err = (torch.abs(preds_v[:, :, 1] - labels_v[:, :, 1]) * mask_v).sum() / n_valid
                 val_fy_errors.append(fy_err.item())
 
         val_loss /= val_frames
@@ -1108,12 +1261,13 @@ def train(exp=None, filter_flat=True):
                 'input_std': input_std,
                 'log_targets': (EXP == 'b'),
                 'lower_body_only': lower_body,
-                'model_class': 'tcn' if use_tcn else ('fft_mlp' if use_fft_mlp else ('transformer' if use_transformer else ('v3' if use_v3 else ('v2' if use_v2 else 'v1')))),
+                'model_class': 'tcn' if use_tcn else ('fft_mlp' if use_fft_mlp else ('transformer' if use_transformer else ('v3' if use_v3 else ('v2_causal' if use_v2_causal else ('v2' if use_v2 else 'v1'))))),
                 'jcf_subdir': jcf_subdir,
                 'clean_features': clean_feats,
                 'include_mass': mass_input,
                 'use_root_features': root_feats,
                 'combine_root_features': combine_root,
+                'lookahead': lookahead,
             }, os.path.join(DATA_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
@@ -1123,7 +1277,7 @@ def train(exp=None, filter_flat=True):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'],
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't'],
                         help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled, i=d+clean features, j=i+log-mag loss, k=i+log-mag+peak loss, l=TCN, m=FFT-MLP, n=i+body mass, o=root-frame features')
     parser.add_argument('--no-flat-filter', action='store_true',
                         help='Disable flat-waveform quality filter (keep all subjects)')

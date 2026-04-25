@@ -248,7 +248,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.testing:
-        root = "./jcf/testing/running"
+        root = "./jcf/full_duration/testing/running"
     else:
         root = "./jcf/full_duration/training/running"
 
