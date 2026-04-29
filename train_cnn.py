@@ -38,11 +38,11 @@ from sklearn.model_selection import train_test_split
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
-SEED = 42
-DATA_ROOT = "./jcf/full_duration/training/running"
+SEED = 1
+DATA_ROOT = "./jcf/full_duration/training/walking"
 BATCH_SIZE = 8          # full sequences per batch (pad to max length)
 EPOCHS = 300
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-4
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TRAIN_SPLIT = 0.8       # 80% train, 20% val (by subject)
 N_LOWER_BODY = 20       # joints 0-19: pelvis, hips, knees, ankles, feet
@@ -170,7 +170,8 @@ def load_sto(path, skiprows=11):
 
 def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
                  jcf_subdir='jcf_output', clean_features=False, include_mass=False,
-                 use_root_features=False, combine_root_features=False):
+                 use_root_features=False, combine_root_features=False,
+                 max_peak_bw=10.0, include_speed=False):
     """
     Load one subject's data. Returns (inputs, labels, mass) or None.
 
@@ -220,7 +221,12 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
 
     # Filter out subjects with unreasonable JCF (bad SO output)
     peak_resultant = np.sqrt((jcf_data ** 2).sum(axis=1)).max()
-    if peak_resultant > 10.0:
+    if peak_resultant > max_peak_bw:
+        return None
+
+    # Reject trials too short to provide context for a bidirectional CNN
+    # (Falisse, downhill running, and other fragments often have <100 frames).
+    if len(jcf_data) < 100:
         return None
 
     # Align by time: find overlapping time range
@@ -276,9 +282,10 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
             np.interp(t_common, root_time, root_data[:, j])
             for j in range(root_data.shape[1])
         ])
-        # Normalize GRF-in-root-frame columns (last 6 before COM acc) by BW
-        # Layout: joint_centers(60) + root_dynamics(12) + grf_root(6) + com_acc(3) = 81
-        root_interp[:, 72:78] /= BW
+        # Normalize GRF-in-root-frame columns (last 6 before COM acc) by BW.
+        # Layout: joint_centers(n_joints*3) + root_dynamics(12) + grf_root(6) + com_acc(3)
+        # Use negative indices since n_joints varies by dataset.
+        root_interp[:, -9:-3] /= BW
         parts = [root_interp]
     else:
         parts = [ik_interp, ik_vel, ik_acc, grf_interp, grf_vel]
@@ -288,8 +295,9 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
             return None
         root_data = np.load(root_path)
         root_time = ik_time[:len(root_data)]
-        # Only take root dynamics (60:81): root vel/acc (12) + GRF in root frame (6) + COM acc (3)
-        root_dyn = root_data[:, 60:]
+        # Skip leading joint_centers block (varies by dataset: 60/63/66 cols).
+        # Take last 21 cols: root vel/acc (12) + GRF in root frame (6) + COM acc (3)
+        root_dyn = root_data[:, -21:]
         root_dyn_interp = np.column_stack([
             np.interp(t_common, root_time, root_dyn[:, j])
             for j in range(root_dyn.shape[1])
@@ -298,6 +306,15 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
         parts.append(root_dyn_interp)
     if include_mass:
         parts.append(np.full((len(t_common), 1), mass))
+    if include_speed:
+        # Smoothed horizontal pelvis speed (proxy for gait speed). 1s window.
+        # Uses raw IK pelvis_tx (index 3) before any joint slicing.
+        speed_raw = np.abs(np.gradient(ik_data[:, 3], ik_time))
+        speed_interp = np.interp(t_common, ik_time, speed_raw)
+        win = min(100, len(speed_interp))
+        kernel = np.ones(win) / win
+        speed_smooth = np.convolve(speed_interp, kernel, mode='same')
+        parts.append(speed_smooth.reshape(-1, 1))
     inputs = np.hstack(parts)
 
     if with_confidence:
@@ -319,8 +336,10 @@ class JCFDataset(Dataset):
 
     def __init__(self, subject_dirs, lower_body_only=False, with_confidence=False,
                  jcf_subdir='jcf_output', clean_features=False, include_mass=False,
-                 use_root_features=False, combine_root_features=False):
+                 use_root_features=False, combine_root_features=False,
+                 max_peak_bw=10.0, include_speed=False):
         self.sequences = []  # list of (inputs, labels, length) or (inputs, labels, length, confidence)
+        self.loaded_dirs = []  # subj_dirs that successfully loaded (1:1 with sequences)
         self.has_confidence = with_confidence
 
         for subj_dir in subject_dirs:
@@ -329,9 +348,12 @@ class JCFDataset(Dataset):
                                  jcf_subdir=jcf_subdir, clean_features=clean_features,
                                  include_mass=include_mass,
                                  use_root_features=use_root_features,
-                                 combine_root_features=combine_root_features)
+                                 combine_root_features=combine_root_features,
+                                 max_peak_bw=max_peak_bw,
+                                 include_speed=include_speed)
             if result is None:
                 continue
+            self.loaded_dirs.append(subj_dir)
             if with_confidence:
                 inputs, labels, mass, conf = result
                 T = len(labels)
@@ -534,7 +556,7 @@ class JCF_CNN_v2(nn.Module):
     Output: [batch, seq_len, 3]
     """
 
-    def __init__(self, n_features=43, n_outputs=3):
+    def __init__(self, n_features=43, n_outputs=3, dropout=0.1):
         super().__init__()
 
         # Input projection
@@ -546,10 +568,10 @@ class JCF_CNN_v2(nn.Module):
 
         # Residual blocks with increasing dilation
         self.res_blocks = nn.Sequential(
-            ResBlock1d(128, kernel_size=5, dilation=1),
-            ResBlock1d(128, kernel_size=5, dilation=2),
-            ResBlock1d(128, kernel_size=5, dilation=4),
-            ResBlock1d(128, kernel_size=5, dilation=8),
+            ResBlock1d(128, kernel_size=5, dilation=1, dropout=dropout),
+            ResBlock1d(128, kernel_size=5, dilation=2, dropout=dropout),
+            ResBlock1d(128, kernel_size=5, dilation=4, dropout=dropout),
+            ResBlock1d(128, kernel_size=5, dilation=8, dropout=dropout),
         )
 
         # Per-frame output head
@@ -830,35 +852,52 @@ class JCF_Transformer(nn.Module):
 
 # ─── Training ─────────────────────────────────────────────────────────────────
 
-def train(exp=None, filter_flat=True):
+def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10.0):
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     EXP = exp
-    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't')
+    n3_variants = ('n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15')
+    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants
     use_v2 = EXP in ('d', 'g', 'i', 'j', 'k', 'n', 'o', 'p', 'q')
     use_v2_causal = EXP in ('r', 's', 't')
-    use_v3 = False
+    use_v3 = EXP in n3_variants
     use_transformer = EXP == 'h'
     use_tcn = EXP == 'l'
     use_fft_mlp = EXP == 'm'
-    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't')
+    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants
+    bin_rebalance = EXP == 'n3_bin'  # rebalance by peak magnitude bin instead of dataset
     clean_only = EXP == 'e'
     use_confidence = EXP == 'f'
-    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't')
-    mass_input = EXP in ('l', 'n', 'o', 'p', 'q', 'r', 's', 't')
+    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't') + n3_variants
+    mass_input = EXP in ('l', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants
+    speed_input = EXP in ('n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15')
     root_feats = EXP == 'o'
     combine_root = EXP == 'p'
+    # Per-experiment overrides
+    v3_dropout = 0.05 if EXP in ('n3_d05', 'n3_d05_w15') else 0.15
+    sym_loss_mag_weight = 1.5 if EXP in ('n3_w15', 'n3_d05_w15') else 0.5
     lookahead = 10 if EXP in ('s', 't') else 0
     scaled_labels = EXP in ('g', 'h')  # use 2x muscle-scaled SO labels
     # Find all subjects with JCF output
     jcf_subdir = 'jcf_output_2x' if scaled_labels else 'jcf_output'
+    excluded_set = set(exclude) if exclude else set()
     subject_dirs = []
     for name in sorted(os.listdir(DATA_ROOT)):
+        if dataset and not name.startswith(f"{dataset}_"):
+            continue
+        if any(name.startswith(f"{ex}_") for ex in excluded_set):
+            continue
         subj_dir = os.path.join(DATA_ROOT, name)
         jcf_sto = os.path.join(subj_dir, jcf_subdir,
                                'BatchJCF_JointReaction_ReactionLoads.sto')
         if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
             subject_dirs.append(subj_dir)
+    if dataset:
+        print(f"Dataset filter: {dataset} only ({len(subject_dirs)} subjects)")
+    if excluded_set:
+        print(f"Excluded datasets: {sorted(excluded_set)}")
+    if max_peak_bw < 10.0:
+        print(f"Max peak filter: {max_peak_bw} BW (subjects with higher peaks rejected)")
     if scaled_labels:
         print(f"Using scaled JCF labels from {jcf_subdir}/")
     if clean_feats:
@@ -896,7 +935,9 @@ def train(exp=None, filter_flat=True):
                           with_confidence=use_confidence,
                           jcf_subdir=jcf_subdir, clean_features=clean_feats,
                           include_mass=mass_input, use_root_features=root_feats,
-                          combine_root_features=combine_root)
+                          combine_root_features=combine_root,
+                          max_peak_bw=max_peak_bw,
+                          include_speed=speed_input)
     print(f"  {len(train_ds)} training sequences")
 
     # Compute global normalization stats from training data
@@ -914,7 +955,9 @@ def train(exp=None, filter_flat=True):
                         with_confidence=use_confidence,
                         jcf_subdir=jcf_subdir, clean_features=clean_feats,
                         include_mass=mass_input, use_root_features=root_feats,
-                        combine_root_features=combine_root)
+                        combine_root_features=combine_root,
+                        max_peak_bw=max_peak_bw,
+                        include_speed=speed_input)
     val_ds.normalize(input_mean, input_std)
     print(f"  {len(val_ds)} validation sequences")
 
@@ -928,34 +971,35 @@ def train(exp=None, filter_flat=True):
         print("No training sequences. Check data.")
         return
 
-    # Dataset rebalancing: oversample minority datasets
+    # Dataset/magnitude rebalancing: oversample minority groups
     if rebalance:
         from torch.utils.data import WeightedRandomSampler
-        # Compute per-sample weight based on dataset source
-        dataset_counts = {}
-        sample_datasets = []
-        for d in train_dirs:
-            name = os.path.basename(d)
-            # Extract dataset prefix (e.g. 'carter', 'hammer', 'moore')
-            prefix = name.split('_')[0]
-            dataset_counts[prefix] = dataset_counts.get(prefix, 0) + 1
-            sample_datasets.append(prefix)
-        # Only count samples that made it into the dataset (load_subject can return None)
-        # Re-derive from train_dirs that successfully loaded
-        loaded_prefixes = []
-        for d in train_dirs:
-            result = load_subject(d, lower_body_only=lower_body, jcf_subdir=jcf_subdir,
-                                 clean_features=clean_feats, include_mass=mass_input,
-                                 use_root_features=root_feats,
-                                 combine_root_features=combine_root)
-            if result is not None:
-                loaded_prefixes.append(os.path.basename(d).split('_')[0])
-        dataset_counts_loaded = {}
-        for p in loaded_prefixes:
-            dataset_counts_loaded[p] = dataset_counts_loaded.get(p, 0) + 1
-        weights = [1.0 / dataset_counts_loaded[p] for p in loaded_prefixes]
-        sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-        print(f"  Rebalancing: {dataset_counts_loaded}")
+        if bin_rebalance:
+            # Per-subject peak magnitude binning. Force equal exposure across peak
+            # ranges to fight the model's tendency to predict near the median.
+            bin_edges = [0.0, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0]
+            peaks = []
+            for seq in train_ds.sequences:
+                labels = seq[1].numpy() if hasattr(seq[1], 'numpy') else seq[1]
+                peaks.append(float(np.sqrt((labels ** 2).sum(axis=-1)).max()))
+            peaks = np.array(peaks)
+            bin_idx = np.digitize(peaks, bin_edges[1:-1])  # 0..len-2
+            bin_counts = np.bincount(bin_idx, minlength=len(bin_edges)-1)
+            weights = [1.0 / max(bin_counts[bi], 1) for bi in bin_idx]
+            sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+            label_pairs = [(f'{bin_edges[i]:.1f}-{bin_edges[i+1]:.1f}', int(bin_counts[i]))
+                           for i in range(len(bin_counts))]
+            print(f"  Magnitude-bin rebalancing: {label_pairs}")
+        else:
+            # Use the dataset's record of which subjects actually loaded (1:1 with
+            # train_ds.sequences) so the sampler is sized correctly.
+            loaded_prefixes = [os.path.basename(d).split('_')[0] for d in train_ds.loaded_dirs]
+            dataset_counts_loaded = {}
+            for p in loaded_prefixes:
+                dataset_counts_loaded[p] = dataset_counts_loaded.get(p, 0) + 1
+            weights = [1.0 / dataset_counts_loaded[p] for p in loaded_prefixes]
+            sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+            print(f"  Dataset rebalancing: {dataset_counts_loaded}")
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
                                   num_workers=0, pin_memory=True,
                                   collate_fn=collate_fn)
@@ -983,8 +1027,8 @@ def train(exp=None, filter_flat=True):
         model = JCF_Transformer(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_Transformer (conv stem + transformer encoder)")
     elif use_v3:
-        model = JCF_CNN_v3(n_features=n_features, n_outputs=3).to(DEVICE)
-        print("Using JCF_CNN_v3 (256ch, 6 res blocks, dropout 0.15)")
+        model = JCF_CNN_v3(n_features=n_features, n_outputs=3, dropout=v3_dropout).to(DEVICE)
+        print(f"Using JCF_CNN_v3 (256ch, 6 res blocks, dropout {v3_dropout})")
     elif use_v2_causal:
         model = JCF_CNN_v2_causal(n_features=n_features, n_outputs=3).to(DEVICE)
         print("Using JCF_CNN_v2_causal (causal residual blocks — online/streaming)")
@@ -997,16 +1041,16 @@ def train(exp=None, filter_flat=True):
     print(f"Model parameters: {n_params:,}")
     print(f"Device: {DEVICE}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=10, factor=0.5
+        optimizer, patience=5, factor=0.5
     )
 
     def masked_mse(preds, labels, mask, confidence=None):
         mask_3d = mask.unsqueeze(-1)
         return ((preds - labels) ** 2 * mask_3d).sum() / (mask.sum().float() * 3)
 
-    def symmetric_loss(preds, labels, mask, confidence=None):
+    def symmetric_loss(preds, labels, mask, confidence=None, mag_weight=0.5):
         """Magnitude-weighted MSE + gradient matching."""
         mask_3d = mask.unsqueeze(-1)
         n_valid = mask.sum().float() * 3
@@ -1020,7 +1064,7 @@ def train(exp=None, filter_flat=True):
         label_grad = labels[:, 1:] - labels[:, :-1]
         grad_mask = (mask[:, 1:] & mask[:, :-1]).unsqueeze(-1)
         grad_loss = ((pred_grad - label_grad) ** 2 * grad_mask).sum() / (grad_mask.sum().float() * 3 + 1e-8)
-        return mse + 0.5 * weighted + 0.3 * grad_loss
+        return mse + mag_weight * weighted + 0.3 * grad_loss
 
     def confidence_weighted_loss(preds, labels, mask, confidence=None):
         """Symmetric loss weighted by per-frame SO confidence."""
@@ -1139,9 +1183,11 @@ def train(exp=None, filter_flat=True):
     elif EXP in ('r', 's'):
         criterion = asymmetric_linear_loss
         print("Loss: asymmetric linear (underprediction weight grows linearly with mag)")
-    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p', 't'):
-        criterion = symmetric_loss
-        print("Loss: symmetric (MSE + magnitude-weighted + gradient)")
+    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15'):
+        # Inject the per-experiment magnitude weight (default 0.5; n3_w15 uses 1.5)
+        _w = sym_loss_mag_weight
+        criterion = lambda p, l, m, confidence=None: symmetric_loss(p, l, m, confidence, mag_weight=_w)
+        print(f"Loss: symmetric (MSE + {_w}×magnitude-weighted + 0.3×gradient)")
     elif EXP == 'j':
         criterion = log_magnitude_loss
         print("Loss: log-magnitude (flattened weighting + gradient)")
@@ -1268,6 +1314,7 @@ def train(exp=None, filter_flat=True):
                 'use_root_features': root_feats,
                 'combine_root_features': combine_root,
                 'lookahead': lookahead,
+                'include_speed': speed_input,
             }, os.path.join(DATA_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
@@ -1277,9 +1324,16 @@ def train(exp=None, filter_flat=True):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't'],
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15'],
                         help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled, i=d+clean features, j=i+log-mag loss, k=i+log-mag+peak loss, l=TCN, m=FFT-MLP, n=i+body mass, o=root-frame features')
     parser.add_argument('--no-flat-filter', action='store_true',
                         help='Disable flat-waveform quality filter (keep all subjects)')
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='Restrict training to one dataset prefix (e.g. carter, hammer). Default: all.')
+    parser.add_argument('--exclude', type=str, nargs='+', default=None,
+                        help='Dataset prefixes to exclude (e.g. --exclude han fregly).')
+    parser.add_argument('--max-peak', type=float, default=10.0,
+                        help='Reject subjects with JCF resultant peak > this many BW. Walking: 4.0 recommended.')
     args = parser.parse_args()
-    train(exp=args.exp, filter_flat=not args.no_flat_filter)
+    train(exp=args.exp, filter_flat=not args.no_flat_filter,
+          dataset=args.dataset, exclude=args.exclude, max_peak_bw=args.max_peak)

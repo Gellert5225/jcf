@@ -243,14 +243,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--testing', action='store_true',
                         help='Process testing subjects instead of training')
+    parser.add_argument('--activity', type=str, default='running',
+                        choices=['running', 'walking'],
+                        help='Activity type (default: running)')
     parser.add_argument('--force', action='store_true',
                         help='Re-extract even if root_features.npy exists')
     args = parser.parse_args()
 
-    if args.testing:
-        root = "./jcf/full_duration/testing/running"
-    else:
-        root = "./jcf/full_duration/training/running"
+    split = 'testing' if args.testing else 'training'
+    root = f"./jcf/full_duration/{split}/{args.activity}"
 
     print(f"Extracting root-frame features from: {root}")
     process_directory(root, force=args.force)

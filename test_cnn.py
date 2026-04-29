@@ -18,16 +18,19 @@ import matplotlib.pyplot as plt
 # Reuse data loading and model from train_cnn
 from train_cnn import load_subject, JCF_CNN, JCF_CNN_v2, JCF_CNN_v2_causal, JCF_CNN_v3, JCF_Transformer, JCF_TCN, JCF_FFT_MLP
 
-TEST_ROOT = "./jcf/full_duration/testing/running"
+TEST_ROOT = "./jcf/full_duration/testing/walking"
 DEVICE = "cpu"
 
 
-def test(exp=None, calibrate_peaks=0):
+def test(exp=None, calibrate_peaks=0, calibrate_mode='trial', dataset=None, exclude=None, max_peak_bw=10.0):
     suffix = f"_{exp}" if exp else ""
     if calibrate_peaks > 0:
-        suffix += f"_cal{calibrate_peaks}"
+        cal_tag = f"_cal{calibrate_peaks}"
+        if calibrate_mode == 'subject':
+            cal_tag += 's'
+        suffix += cal_tag
     model_name = f"best_model_{exp}.pt" if exp else "best_model.pt"
-    model_path = f"./jcf/full_duration/training/running/{model_name}"
+    model_path = f"./jcf/full_duration/training/walking/{model_name}"
 
     # Load checkpoint
     checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=True)
@@ -40,6 +43,7 @@ def test(exp=None, calibrate_peaks=0):
     use_root_features = checkpoint.get('use_root_features', False)
     combine_root_features = checkpoint.get('combine_root_features', False)
     lookahead = checkpoint.get('lookahead', 0)
+    include_speed = checkpoint.get('include_speed', False)
     n_features = checkpoint['n_features']
     input_mean = checkpoint['input_mean']
     input_std = checkpoint['input_std']
@@ -79,20 +83,36 @@ def test(exp=None, calibrate_peaks=0):
     if jcf_subdir != 'jcf_output':
         print(f"Using JCF labels from {jcf_subdir}/")
 
-    # Find test subjects
+    excluded_set = set(exclude) if exclude else set()
     subject_dirs = []
     for name in sorted(os.listdir(TEST_ROOT)):
+        if dataset and not name.startswith(f"{dataset}_"):
+            continue
+        if any(name.startswith(f"{ex}_") for ex in excluded_set):
+            continue
         subj_dir = os.path.join(TEST_ROOT, name)
         jcf_sto = os.path.join(subj_dir, jcf_subdir,
                                'BatchJCF_JointReaction_ReactionLoads.sto')
         if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
             subject_dirs.append((name, subj_dir))
+    if dataset:
+        print(f"Dataset filter: {dataset} only")
+    if excluded_set:
+        print(f"Excluded datasets: {sorted(excluded_set)}")
 
     print(f"\nFound {len(subject_dirs)} test subjects")
 
     if not subject_dirs:
         print("No test data found.")
         return
+
+    # Cache of subject_key -> calibration scale (used in subject mode only)
+    import re
+    def _subject_key(name):
+        # Strip trailing _t## and optional _r## so all trials of one subject share a key
+        return re.sub(r'_t\d+(_r\d+)?$', '', name)
+
+    calibration_scales = {}
 
     # Predict on each subject using sliding window, then average overlaps
     all_results = []
@@ -101,9 +121,12 @@ def test(exp=None, calibrate_peaks=0):
                              jcf_subdir=jcf_subdir, clean_features=clean_features,
                              include_mass=include_mass,
                              use_root_features=use_root_features,
-                             combine_root_features=combine_root_features)
+                             combine_root_features=combine_root_features,
+                             max_peak_bw=max_peak_bw,
+                             include_speed=include_speed)
         if result is None:
-            print(f"  {subj_name}: SKIP (missing files)")
+            print(f"  {subj_name}: SKIP (load_subject returned None — missing files, "
+                  f"peak > {max_peak_bw} BW, trial < 100 frames, or wrong GRF columns)")
             continue
 
         inputs, labels, mass = result
@@ -134,25 +157,36 @@ def test(exp=None, calibrate_peaks=0):
 
         # Subject-specific calibration: fit a scalar using the first N GT peaks.
         # Simulates measuring a few reference cycles per subject before deployment.
+        # Mode 'trial': compute scale per trial. Mode 'subject': compute scale once
+        # from the first trial of each subject and reuse for all later trials.
+        scale = 1.0
+        cal_end = 0
         if calibrate_peaks > 0:
             from scipy.signal import find_peaks as _find_peaks
             gt_res = np.sqrt((labels ** 2).sum(axis=1))
             pred_res = np.sqrt((preds ** 2).sum(axis=1))
-            gt_peak_idx, _ = _find_peaks(gt_res, height=0.5, distance=15)
-            if len(gt_peak_idx) >= calibrate_peaks:
-                cal_idx = gt_peak_idx[:calibrate_peaks]
-                # Per-peak ratio then mean (robust to a single bad peak)
-                ratios = gt_res[cal_idx] / (pred_res[cal_idx] + 1e-8)
-                scale = np.mean(ratios)
-                preds = preds * scale
-                # Exclude calibration region from evaluation
-                cal_end = cal_idx[-1] + 15
-            else:
-                scale = 1.0
-                cal_end = 0
-        else:
-            scale = 1.0
-            cal_end = 0
+
+            need_compute = True
+            if calibrate_mode == 'subject':
+                subj_key = _subject_key(subj_name)
+                if subj_key in calibration_scales:
+                    scale = calibration_scales[subj_key]
+                    need_compute = False  # reuse cached scale, don't mask any frames
+
+            if need_compute:
+                gt_peak_idx, _ = _find_peaks(gt_res, height=0.5, distance=15)
+                if len(gt_peak_idx) >= calibrate_peaks:
+                    cal_idx = gt_peak_idx[:calibrate_peaks]
+                    ratios = gt_res[cal_idx] / (pred_res[cal_idx] + 1e-8)
+                    scale = float(np.median(ratios))  # median: robust to single bad peak
+                    cal_end = cal_idx[-1] + 15
+                else:
+                    scale = 1.0
+                    cal_end = 0
+                if calibrate_mode == 'subject':
+                    calibration_scales[_subject_key(subj_name)] = scale
+
+            preds = preds * scale
 
         valid = np.ones(T, dtype=bool)
         if calibrate_peaks > 0 and cal_end > 0:
@@ -305,8 +339,19 @@ def test(exp=None, calibrate_peaks=0):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't'])
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15'])
     parser.add_argument('--calibrate', type=int, default=0,
                         help='Use first N GT peaks to compute a per-subject scale factor. 0=disabled.')
+    parser.add_argument('--calibrate-mode', type=str, default='trial',
+                        choices=['trial', 'subject'],
+                        help='trial: compute scale per trial. subject: compute once per subject from first trial.')
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='Restrict testing to one dataset prefix (e.g. carter). Default: all.')
+    parser.add_argument('--exclude', type=str, nargs='+', default=None,
+                        help='Dataset prefixes to exclude (e.g. --exclude han fregly).')
+    parser.add_argument('--max-peak', type=float, default=10.0,
+                        help='Reject test trials with JCF resultant peak > this many BW. Walking: 4.0 recommended.')
     args = parser.parse_args()
-    test(exp=args.exp, calibrate_peaks=args.calibrate)
+    test(exp=args.exp, calibrate_peaks=args.calibrate,
+         calibrate_mode=args.calibrate_mode, dataset=args.dataset,
+         exclude=args.exclude, max_peak_bw=args.max_peak)
