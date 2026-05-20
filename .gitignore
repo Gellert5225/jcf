@@ -8,3 +8,5 @@ __pycache__
 *.npz
 .venv
 .DS_Store
+/paper
+.claude

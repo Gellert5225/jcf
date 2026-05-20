@@ -171,7 +171,10 @@ def load_sto(path, skiprows=11):
 def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
                  jcf_subdir='jcf_output', clean_features=False, include_mass=False,
                  use_root_features=False, combine_root_features=False,
-                 max_peak_bw=10.0, include_speed=False):
+                 max_peak_bw=10.0, include_speed=False, include_stance=False,
+                 predict_moment=False, predict_flexion_moment=False,
+                 max_moment_bwh=0.15, min_length=100,
+                 native_time_grid=False):
     """
     Load one subject's data. Returns (inputs, labels, mass) or None.
 
@@ -217,36 +220,85 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
     fx = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fx'].values
     fy = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fy'].values
     fz = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fz'].values
-    jcf_data = np.column_stack([fx, fy, fz]) / BW  # normalize by BW
+    force_data = np.column_stack([fx, fy, fz]) / BW  # forces normalized by BW
 
-    # Filter out subjects with unreasonable JCF (bad SO output)
-    peak_resultant = np.sqrt((jcf_data ** 2).sum(axis=1)).max()
+    if predict_moment:
+        # Mx = knee adduction/abduction (varus-valgus) moment in N·m
+        # Mz = knee flexion-extension moment (clinically relevant for patellofemoral loading)
+        # Normalize both by BW × height (dimensionless), per Schipplein/Andriacchi
+        # convention. height_m must be in metadata.
+        height_m = meta.get('height_m', None)
+        if height_m is None or height_m <= 0:
+            return None
+        # OpenSim's JointReaction (apply_on_bodies=child, express_in_frame=child)
+        # for the Rajagopal walker_knee_r returns Mx in the tibia frame with the
+        # convention that Mx > 0 corresponds to medial-compartment loading during
+        # right-leg stance — i.e., it already matches the Schipplein-Andriacchi
+        # M_add. No sign flip is needed.
+        mx = jcf['walker_knee_r_on_tibia_r_in_tibia_r_mx'].values
+        mx_norm = mx / (BW * height_m)
+        # Reject SO-corrupted moments (healthy walking |Mx_norm| < ~0.05; 0.15 = 3× max)
+        if np.abs(mx_norm).max() > max_moment_bwh:
+            return None
+        moment_cols = [mx_norm.reshape(-1, 1)]
+        if predict_flexion_moment:
+            mz = jcf['walker_knee_r_on_tibia_r_in_tibia_r_mz'].values
+            mz_norm = mz / (BW * height_m)
+            if np.abs(mz_norm).max() > max_moment_bwh:
+                return None
+            moment_cols.append(mz_norm.reshape(-1, 1))
+        jcf_data = np.column_stack([force_data, *moment_cols])  # [T, 4 or 5]
+    else:
+        jcf_data = force_data  # [T, 3]
+
+    # Filter out subjects with unreasonable JCF (bad SO output).
+    # Use force-only resultant for the peak-magnitude filter — moment scale differs.
+    peak_resultant = np.sqrt((force_data ** 2).sum(axis=1)).max()
     if peak_resultant > max_peak_bw:
         return None
 
     # Reject trials too short to provide context for a bidirectional CNN
     # (Falisse, downhill running, and other fragments often have <100 frames).
-    if len(jcf_data) < 100:
+    # MLP path passes min_length=1 to keep short static segments.
+    if len(jcf_data) < min_length:
         return None
 
     # Align by time: find overlapping time range
     t_start = max(ik_time[0], grf_time[0], jcf_time[0])
     t_end = min(ik_time[-1], grf_time[-1], jcf_time[-1])
 
-    # Interpolate everything to JCF timestamps (they're the most sparse)
-    jcf_mask = (jcf_time >= t_start) & (jcf_time <= t_end)
-    t_common = jcf_time[jcf_mask]
-    labels = jcf_data[jcf_mask]
-
-    # Interpolate IK and GRF to jcf timestamps
-    ik_interp = np.column_stack([
-        np.interp(t_common, ik_time, ik_data[:, j])
-        for j in range(ik_data.shape[1])
-    ])
-    grf_interp = np.column_stack([
-        np.interp(t_common, grf_time, grf_data[:, j])
-        for j in range(grf_data.shape[1])
-    ])
+    if native_time_grid:
+        # Anchor to the IK time grid: no smoothing of IK inputs from interpolation.
+        # Labels and GRF get interpolated onto IK time. This matches what an
+        # inference deployment sees (raw IK with no resampling), so the same
+        # network at runtime gets exactly the inputs it was trained on.
+        ik_mask = (ik_time >= t_start) & (ik_time <= t_end)
+        t_common = ik_time[ik_mask]
+        ik_interp = ik_data[ik_mask]
+        grf_interp = np.column_stack([
+            np.interp(t_common, grf_time, grf_data[:, j])
+            for j in range(grf_data.shape[1])
+        ])
+        labels = np.column_stack([
+            np.interp(t_common, jcf_time, jcf_data[:, j])
+            for j in range(jcf_data.shape[1])
+        ])
+    else:
+        # Default: interpolate everything to JCF timestamps (they're the most sparse).
+        # NOTE: this slightly low-pass filters the IK/GRF inputs because JCF
+        # timestamps are typically sub-sample-shifted from IK timestamps. The
+        # native_time_grid path above avoids this.
+        jcf_mask = (jcf_time >= t_start) & (jcf_time <= t_end)
+        t_common = jcf_time[jcf_mask]
+        labels = jcf_data[jcf_mask]
+        ik_interp = np.column_stack([
+            np.interp(t_common, ik_time, ik_data[:, j])
+            for j in range(ik_data.shape[1])
+        ])
+        grf_interp = np.column_stack([
+            np.interp(t_common, grf_time, grf_data[:, j])
+            for j in range(grf_data.shape[1])
+        ])
 
     # Compute velocity (1st derivative) and acceleration (2nd derivative)
     # Pass t_common directly to np.gradient for correct time scaling
@@ -315,6 +367,16 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
         kernel = np.ones(win) / win
         speed_smooth = np.convolve(speed_interp, kernel, mode='same')
         parts.append(speed_smooth.reshape(-1, 1))
+    if include_stance:
+        # Smoothed per-foot vertical GRF over 1-second window.
+        # Captures gait tempo: slower gait → longer stance phase → higher mean.
+        # force_cols order: r_vx, r_vy, r_vz, l_vx, l_vy, l_vz so vy is at 1, 4.
+        win = min(100, len(t_common))
+        kernel = np.ones(win) / win
+        stance_r = np.convolve(grf_interp[:, 1], kernel, mode='same')
+        stance_l = np.convolve(grf_interp[:, 4], kernel, mode='same')
+        parts.append(stance_r.reshape(-1, 1))
+        parts.append(stance_l.reshape(-1, 1))
     inputs = np.hstack(parts)
 
     if with_confidence:
@@ -337,20 +399,26 @@ class JCFDataset(Dataset):
     def __init__(self, subject_dirs, lower_body_only=False, with_confidence=False,
                  jcf_subdir='jcf_output', clean_features=False, include_mass=False,
                  use_root_features=False, combine_root_features=False,
-                 max_peak_bw=10.0, include_speed=False):
+                 max_peak_bw=10.0, include_speed=False, include_stance=False,
+                 predict_moment=False, predict_flexion_moment=False,
+                 native_time_grid=False):
         self.sequences = []  # list of (inputs, labels, length) or (inputs, labels, length, confidence)
         self.loaded_dirs = []  # subj_dirs that successfully loaded (1:1 with sequences)
         self.has_confidence = with_confidence
 
         for subj_dir in subject_dirs:
             result = load_subject(subj_dir, lower_body_only=lower_body_only,
+                                 native_time_grid=native_time_grid,
                                  with_confidence=with_confidence,
                                  jcf_subdir=jcf_subdir, clean_features=clean_features,
                                  include_mass=include_mass,
                                  use_root_features=use_root_features,
                                  combine_root_features=combine_root_features,
                                  max_peak_bw=max_peak_bw,
-                                 include_speed=include_speed)
+                                 include_speed=include_speed,
+                                 include_stance=include_stance,
+                                 predict_moment=predict_moment,
+                                 predict_flexion_moment=predict_flexion_moment)
             if result is None:
                 continue
             self.loaded_dirs.append(subj_dir)
@@ -414,9 +482,10 @@ def collate_fn(batch):
         inputs_list, labels_list, lengths = zip(*batch)
     max_len = max(lengths)
     n_feat = inputs_list[0].shape[1]
+    n_out = labels_list[0].shape[1]
 
     padded_inputs = torch.zeros(len(batch), max_len, n_feat)
-    padded_labels = torch.zeros(len(batch), max_len, 3)
+    padded_labels = torch.zeros(len(batch), max_len, n_out)
     mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
     padded_conf = torch.ones(len(batch), max_len)  # default confidence = 1.0
 
@@ -852,46 +921,67 @@ class JCF_Transformer(nn.Module):
 
 # ─── Training ─────────────────────────────────────────────────────────────────
 
-def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10.0):
-    torch.manual_seed(SEED)
-    np.random.seed(SEED)
+def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10.0, seed=SEED):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    seed_suffix = f"_s{seed}" if seed != SEED else ""
     EXP = exp
-    n3_variants = ('n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15')
-    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants
-    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k', 'n', 'o', 'p', 'q')
+    n3_variants = ('n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15', 'n3_d05_stance')
+    n_d05_variants = ('n_d05', 'n_d05_m', 'n_d05_m2', 'n_d05_m_s', 'n_d05_m_s2')  # V2 + speed + low dropout. _m=+Mx, _m2=+Mx+Mz, _m_s=+Mx+static, _m_s2=_m_s + native time grid (no IK/GRF resampling)
+    lower_body = EXP in ('c', 'd', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants + n_d05_variants
+    use_v2 = EXP in ('d', 'g', 'i', 'j', 'k', 'n', 'o', 'p', 'q') + n_d05_variants
     use_v2_causal = EXP in ('r', 's', 't')
     use_v3 = EXP in n3_variants
     use_transformer = EXP == 'h'
     use_tcn = EXP == 'l'
     use_fft_mlp = EXP == 'm'
-    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants
+    rebalance = EXP in ('d', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants + n_d05_variants
     bin_rebalance = EXP == 'n3_bin'  # rebalance by peak magnitude bin instead of dataset
     clean_only = EXP == 'e'
     use_confidence = EXP == 'f'
-    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't') + n3_variants
-    mass_input = EXP in ('l', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants
-    speed_input = EXP in ('n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15')
+    clean_feats = EXP in ('i', 'j', 'k', 'l', 'm', 'n', 'p', 'q', 'r', 's', 't') + n3_variants + n_d05_variants
+    mass_input = EXP in ('l', 'n', 'o', 'p', 'q', 'r', 's', 't') + n3_variants + n_d05_variants
+    speed_input = EXP in ('n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15', 'n3_d05_stance') + n_d05_variants
+    stance_input = EXP == 'n3_d05_stance'
+    predict_moment = EXP in ('n_d05_m', 'n_d05_m2', 'n_d05_m_s', 'n_d05_m_s2')
+    include_static = EXP in ('n_d05_m_s', 'n_d05_m_s2')
+    native_time_grid = EXP == 'n_d05_m_s2'
+    predict_flexion_moment = EXP == 'n_d05_m2'
     root_feats = EXP == 'o'
     combine_root = EXP == 'p'
     # Per-experiment overrides
-    v3_dropout = 0.05 if EXP in ('n3_d05', 'n3_d05_w15') else 0.15
+    v3_dropout = 0.05 if EXP in ('n3_d05', 'n3_d05_w15', 'n3_d05_stance') else 0.15
+    v2_dropout = 0.05 if EXP in n_d05_variants else 0.1
     sym_loss_mag_weight = 1.5 if EXP in ('n3_w15', 'n3_d05_w15') else 0.5
+    n_outputs = 3 + (1 if predict_moment else 0) + (1 if predict_flexion_moment else 0)
     lookahead = 10 if EXP in ('s', 't') else 0
     scaled_labels = EXP in ('g', 'h')  # use 2x muscle-scaled SO labels
     # Find all subjects with JCF output
     jcf_subdir = 'jcf_output_2x' if scaled_labels else 'jcf_output'
     excluded_set = set(exclude) if exclude else set()
+    roots_to_scan = [DATA_ROOT]
+    if include_static:
+        static_root = "./jcf/full_duration/training/static"
+        if os.path.isdir(static_root):
+            roots_to_scan.append(static_root)
+        else:
+            print(f"WARNING: include_static set but {static_root} missing")
     subject_dirs = []
-    for name in sorted(os.listdir(DATA_ROOT)):
-        if dataset and not name.startswith(f"{dataset}_"):
-            continue
-        if any(name.startswith(f"{ex}_") for ex in excluded_set):
-            continue
-        subj_dir = os.path.join(DATA_ROOT, name)
-        jcf_sto = os.path.join(subj_dir, jcf_subdir,
-                               'BatchJCF_JointReaction_ReactionLoads.sto')
-        if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
-            subject_dirs.append(subj_dir)
+    for root in roots_to_scan:
+        for name in sorted(os.listdir(root)):
+            if dataset and not name.startswith(f"{dataset}_"):
+                continue
+            if any(name.startswith(f"{ex}_") for ex in excluded_set):
+                continue
+            subj_dir = os.path.join(root, name)
+            jcf_sto = os.path.join(subj_dir, jcf_subdir,
+                                   'BatchJCF_JointReaction_ReactionLoads.sto')
+            if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
+                subject_dirs.append(subj_dir)
+    if include_static:
+        n_static = sum(1 for d in subject_dirs if '/static/' in d)
+        n_walking = len(subject_dirs) - n_static
+        print(f"  Loaded {n_walking} walking + {n_static} static subject dirs")
     if dataset:
         print(f"Dataset filter: {dataset} only ({len(subject_dirs)} subjects)")
     if excluded_set:
@@ -923,11 +1013,24 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
             print("No clean subjects found!")
             return
 
-    # Split by subject (not by window) to avoid data leakage
-    train_dirs, val_dirs = train_test_split(
-        subject_dirs, train_size=TRAIN_SPLIT, random_state=42
+    # Split by SUBJECT (not by trial) to avoid data leakage. Different trials
+    # of the same subject are biomechanically near-identical, so keeping all
+    # trials of a subject in the same split gives an honest val signal.
+    import re
+    def _subject_id(path):
+        # Strip trailing _t## and optional _r## so all trials of one subject share an ID.
+        # e.g. "carter_P003_split0_t04" → "carter_P003_split0"
+        return re.sub(r'_t\d+(_r\d+)?$', '', os.path.basename(path))
+
+    unique_subjects = sorted(set(_subject_id(d) for d in subject_dirs))
+    train_subj, val_subj = train_test_split(
+        unique_subjects, train_size=TRAIN_SPLIT, random_state=seed
     )
-    print(f"Train: {len(train_dirs)} subjects, Val: {len(val_dirs)} subjects")
+    train_subj_set = set(train_subj)
+    train_dirs = [d for d in subject_dirs if _subject_id(d) in train_subj_set]
+    val_dirs   = [d for d in subject_dirs if _subject_id(d) not in train_subj_set]
+    print(f"Train: {len(train_subj)} subjects ({len(train_dirs)} trials), "
+          f"Val: {len(val_subj)} subjects ({len(val_dirs)} trials)")
 
     # Create datasets
     print("Loading training data...")
@@ -937,7 +1040,11 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
                           include_mass=mass_input, use_root_features=root_feats,
                           combine_root_features=combine_root,
                           max_peak_bw=max_peak_bw,
-                          include_speed=speed_input)
+                          include_speed=speed_input,
+                          include_stance=stance_input,
+                          predict_moment=predict_moment,
+                          predict_flexion_moment=predict_flexion_moment,
+                          native_time_grid=native_time_grid)
     print(f"  {len(train_ds)} training sequences")
 
     # Compute global normalization stats from training data
@@ -957,7 +1064,11 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
                         include_mass=mass_input, use_root_features=root_feats,
                         combine_root_features=combine_root,
                         max_peak_bw=max_peak_bw,
-                        include_speed=speed_input)
+                        include_speed=speed_input,
+                        include_stance=stance_input,
+                        predict_moment=predict_moment,
+                        predict_flexion_moment=predict_flexion_moment,
+                        native_time_grid=native_time_grid)
     val_ds.normalize(input_mean, input_std)
     print(f"  {len(val_ds)} validation sequences")
 
@@ -993,11 +1104,20 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
         else:
             # Use the dataset's record of which subjects actually loaded (1:1 with
             # train_ds.sequences) so the sampler is sized correctly.
-            loaded_prefixes = [os.path.basename(d).split('_')[0] for d in train_ds.loaded_dirs]
+            # When mixing activities (include_static), tag dataset prefix with
+            # activity so e.g. carter_walking and carter_static get separate
+            # buckets — otherwise walking (vastly more trials) drowns out static.
+            def _bucket(d):
+                prefix = os.path.basename(d).split('_')[0]
+                if include_static:
+                    activity = 'static' if '/static/' in d else 'walking'
+                    return f"{prefix}_{activity}"
+                return prefix
+            loaded_buckets = [_bucket(d) for d in train_ds.loaded_dirs]
             dataset_counts_loaded = {}
-            for p in loaded_prefixes:
+            for p in loaded_buckets:
                 dataset_counts_loaded[p] = dataset_counts_loaded.get(p, 0) + 1
-            weights = [1.0 / dataset_counts_loaded[p] for p in loaded_prefixes]
+            weights = [1.0 / dataset_counts_loaded[p] for p in loaded_buckets]
             sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
             print(f"  Dataset rebalancing: {dataset_counts_loaded}")
         train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
@@ -1018,25 +1138,25 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
 
     # Create model
     if use_tcn:
-        model = JCF_TCN(n_features=n_features, n_outputs=3).to(DEVICE)
+        model = JCF_TCN(n_features=n_features, n_outputs=n_outputs).to(DEVICE)
         print("Using JCF_TCN (temporal convolutional network, dilations 1-64)")
     elif use_fft_mlp:
-        model = JCF_FFT_MLP(n_features=n_features, n_outputs=3).to(DEVICE)
+        model = JCF_FFT_MLP(n_features=n_features, n_outputs=n_outputs).to(DEVICE)
         print("Using JCF_FFT_MLP (windowed FFT features + MLP)")
     elif use_transformer:
-        model = JCF_Transformer(n_features=n_features, n_outputs=3).to(DEVICE)
+        model = JCF_Transformer(n_features=n_features, n_outputs=n_outputs).to(DEVICE)
         print("Using JCF_Transformer (conv stem + transformer encoder)")
     elif use_v3:
-        model = JCF_CNN_v3(n_features=n_features, n_outputs=3, dropout=v3_dropout).to(DEVICE)
-        print(f"Using JCF_CNN_v3 (256ch, 6 res blocks, dropout {v3_dropout})")
+        model = JCF_CNN_v3(n_features=n_features, n_outputs=n_outputs, dropout=v3_dropout).to(DEVICE)
+        print(f"Using JCF_CNN_v3 (256ch, 6 res blocks, dropout {v3_dropout}, outputs {n_outputs})")
     elif use_v2_causal:
-        model = JCF_CNN_v2_causal(n_features=n_features, n_outputs=3).to(DEVICE)
-        print("Using JCF_CNN_v2_causal (causal residual blocks — online/streaming)")
+        model = JCF_CNN_v2_causal(n_features=n_features, n_outputs=n_outputs).to(DEVICE)
+        print(f"Using JCF_CNN_v2_causal (causal residual blocks — online/streaming, outputs {n_outputs})")
     elif use_v2:
-        model = JCF_CNN_v2(n_features=n_features, n_outputs=3).to(DEVICE)
-        print("Using JCF_CNN_v2 (residual blocks, wider)")
+        model = JCF_CNN_v2(n_features=n_features, n_outputs=n_outputs, dropout=v2_dropout).to(DEVICE)
+        print(f"Using JCF_CNN_v2 (residual blocks, wider, dropout {v2_dropout}, outputs {n_outputs})")
     else:
-        model = JCF_CNN(n_features=n_features, n_outputs=3).to(DEVICE)
+        model = JCF_CNN(n_features=n_features, n_outputs=n_outputs).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
     print(f"Device: {DEVICE}")
@@ -1183,7 +1303,7 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
     elif EXP in ('r', 's'):
         criterion = asymmetric_linear_loss
         print("Loss: asymmetric linear (underprediction weight grows linearly with mag)")
-    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15'):
+    elif EXP in ('a', 'c', 'd', 'e', 'h', 'i', 'l', 'm', 'n', 'o', 'p', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15', 'n3_d05_stance', 'n_d05', 'n_d05_m', 'n_d05_m2'):
         # Inject the per-experiment magnitude weight (default 0.5; n3_w15 uses 1.5)
         _w = sym_loss_mag_weight
         criterion = lambda p, l, m, confidence=None: symmetric_loss(p, l, m, confidence, mag_weight=_w)
@@ -1294,7 +1414,7 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
               f"LR: {lr:.1e}")
 
         # ── Save best ──
-        model_name = f'best_model_{EXP}.pt' if EXP else 'best_model.pt'
+        model_name = f'best_model_{EXP}{seed_suffix}.pt' if EXP else f'best_model{seed_suffix}.pt'
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
@@ -1315,6 +1435,10 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
                 'combine_root_features': combine_root,
                 'lookahead': lookahead,
                 'include_speed': speed_input,
+                'include_stance': stance_input,
+                'predict_moment': predict_moment,
+                'predict_flexion_moment': predict_flexion_moment,
+                'n_outputs': n_outputs,
             }, os.path.join(DATA_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
@@ -1324,7 +1448,7 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15'],
+    parser.add_argument('--exp', type=str, default=None, choices=['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'n3', 'n3s', 'n3_bin', 'n3_w15', 'n3_d05', 'n3_d05_w15', 'n3_d05_stance', 'n_d05', 'n_d05_m', 'n_d05_m2', 'n_d05_m_s', 'n_d05_m_s2'],
                         help='a=symmetric loss, b=log-space, c=lower-body, d=lower-body+resnet+rebalance, e=clean-subjects-only, f=confidence-weighted, g=2x-muscle-scaled labels, h=transformer+2x-scaled, i=d+clean features, j=i+log-mag loss, k=i+log-mag+peak loss, l=TCN, m=FFT-MLP, n=i+body mass, o=root-frame features')
     parser.add_argument('--no-flat-filter', action='store_true',
                         help='Disable flat-waveform quality filter (keep all subjects)')
@@ -1334,6 +1458,9 @@ if __name__ == '__main__':
                         help='Dataset prefixes to exclude (e.g. --exclude han fregly).')
     parser.add_argument('--max-peak', type=float, default=10.0,
                         help='Reject subjects with JCF resultant peak > this many BW. Walking: 4.0 recommended.')
+    parser.add_argument('--seed', type=int, default=SEED,
+                        help=f'Random seed (default: {SEED}). Non-default seeds save to best_model_{{exp}}_s{{N}}.pt')
     args = parser.parse_args()
     train(exp=args.exp, filter_flat=not args.no_flat_filter,
-          dataset=args.dataset, exclude=args.exclude, max_peak_bw=args.max_peak)
+          dataset=args.dataset, exclude=args.exclude, max_peak_bw=args.max_peak,
+          seed=args.seed)

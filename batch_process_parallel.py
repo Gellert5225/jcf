@@ -57,6 +57,7 @@ def _configure_paths(split):
     batch_process.OUTPUT_ROOT = out
     batch_process.OUTPUT_ROOT_RUNNING = os.path.join(out, "running")
     batch_process.OUTPUT_ROOT_WALKING = os.path.join(out, "walking")
+    batch_process.OUTPUT_ROOT_STATIC = os.path.join(out, "static")
     batch_process.SCAN_LOG = os.path.join(out, "scan_failures.txt")
     return out
 
@@ -98,8 +99,9 @@ def main():
                         choices=['training', 'testing', 'both'],
                         help='Which data split to process (default: training)')
     parser.add_argument('--activity', type=str, default='running',
-                        choices=['running', 'walking'],
-                        help='Activity type to process (default: running)')
+                        choices=['running', 'walking', 'static'],
+                        help='Activity type to process (default: running). '
+                             '"static" outputs to jcf/full_duration/<split>/static/')
     args = parser.parse_args()
 
     n_workers = args.workers
@@ -113,11 +115,18 @@ def main():
 
     splits = ['training', 'testing'] if args.split == 'both' else [args.split]
     activity = args.activity
+    is_static = activity == 'static'
     is_running = activity == 'running'
+    scan_mode = 'static' if is_static else 'motion'
 
     for split in splits:
         out = _configure_paths(split)
-        out_activity = batch_process.OUTPUT_ROOT_RUNNING if is_running else batch_process.OUTPUT_ROOT_WALKING
+        if is_static:
+            out_activity = batch_process.OUTPUT_ROOT_STATIC
+        elif is_running:
+            out_activity = batch_process.OUTPUT_ROOT_RUNNING
+        else:
+            out_activity = batch_process.OUTPUT_ROOT_WALKING
         os.makedirs(out, exist_ok=True)
         os.makedirs(out_activity, exist_ok=True)
 
@@ -153,7 +162,7 @@ def main():
             print(f"  [{i+1}/{len(b3d_files)}] Scanning {dataset}/{subject}...",
                   end='', flush=True)
             try:
-                segments = scan_b3d_all_runs(b3d_path)
+                segments = scan_b3d_all_runs(b3d_path, mode=scan_mode)
             except Exception as e:
                 scan_fails.append(output_name)
                 print(f" ERROR: {e}", flush=True)
@@ -177,9 +186,12 @@ def main():
                 run_idx = trial_run_seen.get(t, 0)
                 trial_run_seen[t] = run_idx + 1
 
-                seg_is_running = seg['peak_foot_grf_bw'] > GRF_CAP_WALKING
-                if seg_is_running != is_running:
-                    continue
+                if not is_static:
+                    seg_is_running = seg['peak_foot_grf_bw'] > GRF_CAP_WALKING
+                    if seg_is_running != is_running:
+                        continue
+                # In static mode, scan_b3d_all_runs already returned only static
+                # segments — no further activity classification needed.
 
                 if trial_run_counts[t] == 1:
                     seg_name = f"{output_name}_t{t:02d}"

@@ -1,155 +1,169 @@
 """
-Test the trained MLP on held-out subjects in jcf/testing/.
-Produces per-subject metrics and a plot comparing predicted vs ground truth JCF.
+Test the trained MLP surrogate (`best_model_mlp_<activity>.pt`).
+
+Loads each test subject, runs the per-frame MLP on the same input pipeline used
+in training (no temporal context — the MLP sees one frame at a time), and
+reports R²/MAE/correlation per dataset and per channel.
+
+Per-subject plots (GT vs Predicted, Fy and Mx) are saved into each test
+subject's folder as `inference_mlp_<activity>.png`.
 
 Usage:
-    conda run -n jcf python test_mlp.py
+    python test_mlp.py --activity static
+    python test_mlp.py --activity walking --exclude han fregly
+    python test_mlp.py --activity both --max-peak 6.0
 """
-
 import os
-import json
+import argparse
 import numpy as np
 import torch
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from collections import defaultdict
 
-from train_cnn import load_subject
-from train_mlp import JCF_MLP
+from train_mlp import JCF_MLP, FrameDataset, DATA_ROOTS
 
-TEST_ROOT = "./jcf/testing/walking"
-MODEL_PATH = "./jcf/training/walking/best_model_mlp.pt"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+TEST_ROOTS = {
+    "static":  "./jcf/full_duration/testing/static",
+    "walking": "./jcf/full_duration/testing/walking",
+}
 
-def test():
-    # Load checkpoint
-    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
-    n_features = checkpoint['n_features']
-    window_size = checkpoint['window_size']
 
-    model = JCF_MLP(n_features=n_features, window_size=window_size,
-                    n_outputs=3).to(DEVICE)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-    print(f"Loaded MLP from epoch {checkpoint['epoch']+1} "
-          f"(val_loss={checkpoint['val_loss']:.6f})")
-    print(f"Window size: {window_size}, Features: {n_features}, Device: {DEVICE}")
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--activity", type=str, default="static",
+                   choices=["static", "walking", "both"])
+    p.add_argument("--exclude", type=str, nargs="+", default=None)
+    p.add_argument("--dataset", type=str, default=None,
+                   help="Restrict tests to one prefix (e.g. carter)")
+    p.add_argument("--max-peak", type=float, default=6.0)
+    p.add_argument("--checkpoint", type=str, default=None,
+                   help="Override checkpoint path. Default looks at "
+                        "DATA_ROOTS[activity]/best_model_mlp_<activity>.pt")
+    return p.parse_args()
 
-    # Find test subjects
-    subject_dirs = []
-    for name in sorted(os.listdir(TEST_ROOT)):
-        subj_dir = os.path.join(TEST_ROOT, name)
-        jcf_sto = os.path.join(subj_dir, 'jcf_output',
-                               'BatchJCF_JointReaction_ReactionLoads.sto')
-        if os.path.isdir(subj_dir) and os.path.exists(jcf_sto):
-            subject_dirs.append((name, subj_dir))
 
-    print(f"\nFound {len(subject_dirs)} test subjects")
+def main():
+    args = parse_args()
 
-    if not subject_dirs:
-        print("No test data found.")
+    # Resolve checkpoint
+    if args.checkpoint:
+        ckpt_path = args.checkpoint
+    else:
+        # 'both' is saved into the static root by convention (first key in DATA_ROOTS)
+        root_for_ckpt = DATA_ROOTS["static"] if args.activity in ("static", "both") \
+            else DATA_ROOTS["walking"]
+        ckpt_path = os.path.join(root_for_ckpt, f"best_model_mlp_{args.activity}.pt")
+    if not os.path.exists(ckpt_path):
+        print(f"Checkpoint not found: {ckpt_path}")
+        print("Run train_mlp.py first.")
         return
 
-    # Predict on each subject using sliding window, then average overlaps
-    all_results = []
-    for subj_name, subj_dir in subject_dirs:
-        result = load_subject(subj_dir)
-        if result is None:
-            print(f"  {subj_name}: SKIP (missing files)")
+    ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=True)
+    # Default hidden=128 (current). For older 256-hidden checkpoints, override
+    # with `--hidden 256` if you ever need to load them.
+    model = JCF_MLP(n_features=ckpt["n_features"], n_outputs=ckpt["n_outputs"],
+                    hidden=ckpt.get("hidden", 128), dropout=0.0).to(DEVICE)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    inp_mean = ckpt["input_mean"].cpu().numpy()
+    inp_std = ckpt["input_std"].cpu().numpy()
+    # Variant checkpoints record their input_set / dq_method; default to "full"/"central"
+    # for backwards compatibility with older checkpoints.
+    input_set = ckpt.get("input_set", "full")
+    dq_method = ckpt.get("dq_method", "central")
+    print(f"Loaded {ckpt_path}")
+    print(f"  epoch={ckpt['epoch']+1}, val_loss={ckpt['val_loss']:.6f}, "
+          f"trained on activity={ckpt.get('activity', '?')}")
+    print(f"  input_set={input_set}, dq_method={dq_method}, n_features={ckpt['n_features']}")
+
+    # Pick test directories matching the requested activity
+    excluded = set(args.exclude) if args.exclude else set()
+    test_dirs = []
+    for act in (["static", "walking"] if args.activity == "both" else [args.activity]):
+        root = TEST_ROOTS[act]
+        if not os.path.isdir(root):
+            print(f"  [{act}] test root missing: {root}")
             continue
+        for name in sorted(os.listdir(root)):
+            if args.dataset and not name.startswith(f"{args.dataset}_"):
+                continue
+            if any(name.startswith(f"{ex}_") for ex in excluded):
+                continue
+            d = os.path.join(root, name)
+            jcf = os.path.join(d, "jcf_output", "BatchJCF_JointReaction_ReactionLoads.sto")
+            if os.path.isdir(d) and os.path.exists(jcf):
+                test_dirs.append((act, name, d))
+    print(f"\nFound {len(test_dirs)} test subjects")
+    if not test_dirs:
+        return
 
-        inputs, labels, mass = result
-        T = len(labels)
-        BW = mass * 9.81
+    channel_names = ["Fx", "Fy", "Fz", "Mx"][:ckpt["n_outputs"]]
+    stats = defaultdict(lambda: defaultdict(list))
+    n_processed = 0
+    activity_tag = ckpt.get('activity', 'mlp')
 
-        pred_sum = np.zeros((T, 3))
-        pred_count = np.zeros(T)
+    for act, name, d in test_dirs:
+        single_ds = FrameDataset([d], max_peak_bw=args.max_peak,
+                                 input_set=input_set, dq_method=dq_method)
+        if len(single_ds) == 0:
+            continue
+        n_processed += 1
 
+        x = (single_ds.frames_in - inp_mean) / inp_std
         with torch.no_grad():
-            for start in range(0, T - window_size + 1, 1):
-                end = start + window_size
-                inp = torch.tensor(inputs[start:end], dtype=torch.float32)
-                inp = inp.unsqueeze(0).to(DEVICE)  # [1, W, F]
-                out = model(inp)                     # [1, W, 3]
-                pred_sum[start:end] += out[0].cpu().numpy()
-                pred_count[start:end] += 1
+            pred = model(torch.tensor(x, dtype=torch.float32, device=DEVICE)).cpu().numpy()
+        gt = single_ds.frames_out
 
-        valid = pred_count > 0
-        preds = np.zeros_like(pred_sum)
-        preds[valid] = pred_sum[valid] / pred_count[valid, None]
+        ds_key = name.split("_")[0]
+        for ds in (ds_key, "all"):
+            for ch_idx, ch in enumerate(channel_names):
+                stats[ds][f"{ch}_g"].extend(gt[:, ch_idx])
+                stats[ds][f"{ch}_p"].extend(pred[:, ch_idx])
 
-        # Metrics (in BW)
-        errors = preds[valid] - labels[valid]
-        mae = np.mean(np.abs(errors), axis=0)
-        rmse = np.sqrt(np.mean(errors**2, axis=0))
+        # Per-subject plot
+        T = len(gt)
+        t = np.arange(T) * 0.01
+        n_panels = 2 if pred.shape[1] >= 4 else 1
+        fig, axes = plt.subplots(n_panels, 1, figsize=(13, 3.5 * n_panels), sharex=True)
+        if n_panels == 1:
+            axes = [axes]
+        axes[0].plot(t, gt[:, 1], "b-", lw=1.4, label="GT")
+        axes[0].plot(t, pred[:, 1], "r--", lw=1.4, label="Pred")
+        axes[0].set_ylabel("Fy (BW)")
+        axes[0].set_title(f"{name}  T={T}f  (MLP, activity={activity_tag})")
+        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="upper right")
+        if pred.shape[1] >= 4:
+            axes[1].plot(t, gt[:, 3], "b-", lw=1.4, label="GT")
+            axes[1].plot(t, pred[:, 3], "r--", lw=1.4, label="Pred")
+            axes[1].set_ylabel("Mx (BW × H)")
+            axes[1].grid(True, alpha=0.3); axes[1].legend(loc="upper right")
+        axes[-1].set_xlabel("Frame index × 0.01 s")
+        plt.tight_layout()
+        plt.savefig(os.path.join(d, f"inference_mlp_{activity_tag}.png"),
+                    dpi=110, bbox_inches="tight")
+        plt.close(fig)
 
-        gt_resultant = np.sqrt(np.sum(labels[valid]**2, axis=1))
-        pred_resultant = np.sqrt(np.sum(preds[valid]**2, axis=1))
-        res_mae = np.mean(np.abs(pred_resultant - gt_resultant))
-        res_rmse = np.sqrt(np.mean((pred_resultant - gt_resultant)**2))
-
-        corr_fy = np.corrcoef(preds[valid, 1], labels[valid, 1])[0, 1]
-        corr_res = np.corrcoef(pred_resultant, gt_resultant)[0, 1]
-
-        peak_gt = np.max(np.abs(gt_resultant))
-        peak_pred = np.max(np.abs(pred_resultant))
-
-        print(f"\n  {subj_name} ({T} frames, mass={mass:.1f}kg)")
-        print(f"    Component MAE  (BW):  Fx={mae[0]:.4f}  Fy={mae[1]:.4f}  Fz={mae[2]:.4f}")
-        print(f"    Component RMSE (BW):  Fx={rmse[0]:.4f}  Fy={rmse[1]:.4f}  Fz={rmse[2]:.4f}")
-        print(f"    Resultant MAE:  {res_mae:.4f} BW   RMSE: {res_rmse:.4f} BW")
-        print(f"    Fy correlation: {corr_fy:.4f}   Resultant correlation: {corr_res:.4f}")
-        print(f"    Peak resultant:  GT={peak_gt:.3f} BW  Pred={peak_pred:.3f} BW")
-
-        all_results.append({
-            'name': subj_name,
-            'T': T,
-            'mass': mass,
-            'labels': labels,
-            'preds': preds,
-            'valid': valid,
-        })
-
-    # ── Plot ──────────────────────────────────────────────────────────────────
-    n_subjects = len(all_results)
-    fig, axes = plt.subplots(n_subjects, 2, figsize=(14, 5 * n_subjects),
-                             squeeze=False)
-
-    for i, res in enumerate(all_results):
-        labels = res['labels']
-        preds = res['preds']
-        valid = res['valid']
-        T = res['T']
-        time = np.arange(T) * 0.01  # 100 Hz
-
-        # Left: Axial component (Fy)
-        ax = axes[i, 0]
-        ax.plot(time[valid], labels[valid, 1], 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], preds[valid, 1], 'r--', linewidth=1.5, label='MLP Predicted')
-        ax.set_ylabel('Fy (BW)')
-        ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Axial Force (Fy) [MLP]')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # Right: Resultant
-        ax = axes[i, 1]
-        gt_res = np.sqrt(np.sum(labels[valid]**2, axis=1))
-        pred_res = np.sqrt(np.sum(preds[valid]**2, axis=1))
-        ax.plot(time[valid], gt_res, 'b-', linewidth=1.5, label='Ground Truth')
-        ax.plot(time[valid], pred_res, 'r--', linewidth=1.5, label='MLP Predicted')
-        ax.axhspan(2.5, 3.5, alpha=0.1, color='green', label='Expected peak range')
-        ax.set_ylabel('Resultant JCF (BW)')
-        ax.set_xlabel('Time (s)')
-        ax.set_title(f'{res["name"]} — Resultant JCF [MLP]')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    out_path = os.path.join(TEST_ROOT, 'test_results_mlp.png')
-    plt.savefig(out_path, dpi=150)
-    print(f"\nPlot saved to {out_path}")
-    plt.close()
+    print(f"\nProcessed {n_processed} subjects (plots saved per folder)")
+    print(f"\n{'split':<10} {'channel':<5} {'N':>10} {'corr':>7} {'MAE':>10} {'RMSE':>10} {'R²':>8}")
+    print("-" * 64)
+    for ds in sorted(stats.keys()):
+        for ch in channel_names:
+            g = np.array(stats[ds][f"{ch}_g"])
+            p = np.array(stats[ds][f"{ch}_p"])
+            if len(g) == 0:
+                continue
+            corr = np.corrcoef(g, p)[0, 1]
+            mae = np.mean(np.abs(p - g))
+            rmse = np.sqrt(np.mean((p - g) ** 2))
+            r2 = 1 - np.sum((p - g) ** 2) / max(np.sum((g - g.mean()) ** 2), 1e-12)
+            print(f"{ds:<10} {ch:<5} {len(g):>10} {corr:>7.3f} {mae:>10.5f} "
+                  f"{rmse:>10.5f} {r2:>8.3f}")
+        print()
 
 
-if __name__ == '__main__':
-    test()
+if __name__ == "__main__":
+    main()

@@ -309,10 +309,17 @@ def scan_b3d_for_walking(b3d_path, window_duration=2.0, grf_cap_bw=GRF_CAP_WALKI
     return (trial, sf, nf, mass_kg)
 
 
-def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION):
+def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION, mode='motion'):
     """
     Scan a b3d file and return ALL valid contiguous GRF segments
     where the subject is bearing weight.
+
+    Args:
+        b3d_path:    path to .b3d file
+        min_duration: minimum segment duration in seconds
+        mode:        'motion' (default) keeps walking/running and rejects static.
+                     'static' inverts: keeps only segments where the subject is
+                     standing still (Static_* trials or per-foot GRF std < 0.1*BW).
 
     Returns list of dicts:
         {'trial': int, 'start_frame': int, 'num_frames': int,
@@ -339,8 +346,9 @@ def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION):
 
     for trial in range(subject.getNumTrials()):
         trial_name = subject.getTrialName(trial)
-        if 'static' in trial_name.lower():
-            continue  # skip static posture trials (Carter: Static_1, Han: YYYYMMDD_static_1)
+        is_static_name = 'static' in trial_name.lower()
+        if mode == 'motion' and is_static_name:
+            continue  # skip static posture trials in motion mode
 
         trial_len = subject.getTrialLength(trial)
         trial_passes = subject.getTrialNumProcessingPasses(trial)
@@ -398,15 +406,21 @@ def scan_b3d_all_runs(b3d_path, min_duration=MIN_WINDOW_DURATION):
 
             total_vy = vy_r + vy_l
             mean_grf = np.mean(total_vy)
-            if mean_grf < 0.3 * BW:
-                continue  # not enough loading — swing
-
-            # Static filter: gait alternates foot loading, so per-foot GRF
-            # should vary substantially. Static standing gives near-zero std.
-            # Threshold 0.1*BW cleanly separates static (~0) from walking (>0.3*BW).
             foot_std = max(np.std(vy_r), np.std(vy_l))
-            if foot_std < 0.1 * BW:
-                continue  # static — no alternating foot loading
+
+            if mode == 'motion':
+                if mean_grf < 0.3 * BW:
+                    continue  # not enough loading — swing
+                # Gait alternates foot loading; per-foot GRF must vary substantially.
+                if foot_std < 0.1 * BW:
+                    continue  # static — no alternating foot loading
+            else:  # mode == 'static'
+                # Keep only quasi-stationary loaded standing.
+                # Bilateral standing puts ~0.5 BW on each foot; require both feet loaded.
+                if mean_grf < 0.5 * BW:
+                    continue  # not enough total loading (mid-air or one-footed transition)
+                if foot_std > 0.1 * BW and not is_static_name:
+                    continue  # too much variation, not actually static
 
             peak_foot = max(np.max(vy_r), np.max(vy_l))
             duration = rl * dt
