@@ -23,6 +23,7 @@ import os
 import re
 import argparse
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
@@ -62,37 +63,115 @@ INPUT_SETS = {
         "base_indices": list(range(62)),
         "include_height": True,
         "include_bmi": True,
+        "uses_com": False,
+        "window": 1,
         "desc": "full (q, dq, ddq, F, dF, mass, speed, height, BMI) — 64 ch",
     },
     "qdqf": {
         "base_indices": list(range(16)) + list(range(16, 32)) + list(range(48, 54)),
         "include_height": False,
         "include_bmi": False,
+        "uses_com": False,
+        "window": 1,
         "desc": "(q, dq, F) — 38 ch",
     },
     "qdqfmh": {
         "base_indices": list(range(16)) + list(range(16, 32)) + list(range(48, 54)) + [60],
         "include_height": True,
         "include_bmi": False,
+        "uses_com": False,
+        "window": 1,
         "desc": "(q, dq, F, mass, height) — 40 ch",
     },
     "qf": {
         "base_indices": list(range(16)) + list(range(48, 54)),
         "include_height": False,
         "include_bmi": False,
+        "uses_com": False,
+        "window": 1,
         "desc": "(q, F) — 22 ch",
     },
     "qfmh": {
         "base_indices": list(range(16)) + list(range(48, 54)) + [60],
         "include_height": True,
         "include_bmi": False,
+        "uses_com": False,
+        "window": 1,
         "desc": "(q, F, mass, height) — 24 ch",
+    },
+    # William's GRF-free variants. Features are constructed differently
+    # (load_subject's GRF channels are NOT used). Per-frame layout:
+    #    0-15   q (16 lower-body joint angles, clean_features)
+    #    16-18  v_com (COM velocity x, y, z in world frame)
+    #    19-21  x_com - x_calcn_r (right foot relative position)
+    #    22-24  x_com - x_calcn_l (left foot relative position)
+    #    [25   mass (kg), if include_height]
+    #    [26   height (m), if include_height]
+    # _w20 variant additionally flattens a 20-frame temporal window around
+    # each frame (center frame is the prediction target).
+    "qvcomrel": {
+        "base_indices": None,           # custom assembly, not slicing
+        "include_height": True,         # adds mass and height (treated as a pair)
+        "include_bmi": False,
+        "uses_com": True,
+        "window": 1,
+        "per_frame_ch": 27,
+        "desc": "(q, v_com, x_com - x_r, x_com - x_l, mass, height) — 27 ch, single frame",
+    },
+    "qvcomrel_w20": {
+        "base_indices": None,
+        "include_height": True,
+        "include_bmi": False,
+        "uses_com": True,
+        "window": 20,
+        "per_frame_ch": 27,
+        "desc": "(q, v_com, x_com - x_r, x_com - x_l, mass, height) — 27 ch × 20-frame window = 540 ch",
+    },
+    # William's variant: q is the CURRENT (center-frame) posture replicated across
+    # the entire 20-frame window. Position features are pelvis-relative: COM and
+    # both feet expressed as offsets from the pelvis world position. Pelvis world
+    # position is read from raw IK (pelvis_tx/ty/tz BEFORE clean_features
+    # zero-centering). Closer to a posture-optimizer setup where the optimizer
+    # picks one q and queries the surrogate.
+    "qinst_pelvisrel_w20": {
+        "base_indices": None,
+        "include_height": True,
+        "include_bmi": False,
+        "uses_com": True,
+        "uses_pelvis_rel": True,
+        "replicate_q": True,
+        "window": 20,
+        "per_frame_ch": 27,
+        "desc": "(q_inst, x_com - x_pelvis, x_r - x_pelvis, x_l - x_pelvis, mass, height) — 27 ch × 20-frame window = 540 ch; q replicated across window",
+    },
+    # Variant where q is a TRUE single-frame snapshot (not in any window),
+    # and only the position-relative features are windowed. q + (mass, height)
+    # appear once per sample; the 9 relative-position channels are windowed
+    # into 60 channels each. Smaller per-sample footprint (198 ch) and matches
+    # the posture-optimizer setting more cleanly: optimizer picks one q,
+    # surrogate uses the trajectory of COM and feet up to that posture.
+    "qinst_pelvisrel_winpos_w20": {
+        "base_indices": None,
+        "include_height": True,
+        "include_bmi": False,
+        "uses_com": True,
+        "uses_pelvis_rel": True,
+        "replicate_q": False,
+        "window_only_positions": True,
+        "window": 20,
+        "per_frame_ch": 27,
+        "n_features_total": 16 + 20 * 9 + 2,    # 198: q + window*9 positions + mass + height
+        "desc": "(q_inst (1×), [x_com - x_pelvis windowed], [x_r - x_pelvis windowed], [x_l - x_pelvis windowed], mass, height) — q and (mass,height) instantaneous, positions in 20-frame window = 198 ch total",
     },
 }
 
 
 def feature_count(input_set):
     cfg = INPUT_SETS[input_set]
+    if "n_features_total" in cfg:
+        return cfg["n_features_total"]
+    if cfg.get("uses_com"):
+        return cfg["per_frame_ch"] * cfg.get("window", 1)
     return len(cfg["base_indices"]) + int(cfg["include_height"]) + int(cfg["include_bmi"])
 
 
@@ -147,6 +226,167 @@ def _replace_dq_with_forward_diff(inputs, dt=0.01):
     return inputs
 
 
+def _load_com_features_aligned(subj_dir, target_time):
+    """Load com_features.npz for one trial and interpolate every channel onto
+    target_time (in seconds). Returns dict of arrays each [T, 3] aligned to
+    target_time, or None if features aren't cached.
+    """
+    path = os.path.join(subj_dir, "com_features.npz")
+    if not os.path.exists(path):
+        return None
+    f = np.load(path)
+    src_t = f["time"]
+    out = {}
+    for key in ("com_pos", "com_vel", "calcn_r_pos", "calcn_l_pos"):
+        arr = f[key]
+        out[key] = np.column_stack([
+            np.interp(target_time, src_t, arr[:, j]) for j in range(3)
+        ]).astype(np.float32)
+    return out
+
+
+def _build_com_features(subj_dir, cfg, max_peak_bw, min_length, predict_moment):
+    """Construct the (q, v_com, x_com - x_r, x_com - x_l, [mass, height]) feature
+    matrix for one trial. Returns (features [T, per_frame_ch], labels [T, 4], mass).
+
+    Uses load_subject with native_time_grid=True so the IK time grid is preserved
+    end-to-end, making alignment with the cached COM features straightforward.
+    """
+    import json as _json
+    r = load_subject(subj_dir,
+                     lower_body_only=True,
+                     clean_features=True,
+                     include_mass=True,
+                     include_speed=False,           # not needed for this variant
+                     predict_moment=predict_moment,
+                     max_peak_bw=max_peak_bw,
+                     min_length=min_length,
+                     native_time_grid=True)
+    if r is None:
+        return None
+    inputs, labels, mass = r
+
+    # q is channels 0:16 of the load_subject output
+    q = inputs[:, :16]
+    T = q.shape[0]
+
+    # Read trial metadata + subject height
+    try:
+        meta = _json.load(open(os.path.join(subj_dir, "metadata.json")))
+        height_m = float(meta.get("height_m", 1.7))
+    except Exception:
+        return None
+    if height_m <= 0:
+        return None
+
+    # We need IK time to align COM features. native_time_grid=True trims to
+    # the common range, so reconstruct the time grid from the trial's IK file.
+    ik_path = os.path.join(subj_dir, "ik_results.mot")
+    if not os.path.exists(ik_path):
+        return None
+    ik_df = pd.read_csv(ik_path, sep=r"\s+", skiprows=6)
+    ik_time = ik_df["time"].values
+    # Trim to match q (load_subject's trim mask used max/min on ik/grf/jcf times).
+    # We don't have the exact mask, so interpolate onto a uniform t-grid matching q's length.
+    # Build a uniform grid spanning the full range of ik_time, length T.
+    if T < 1 or len(ik_time) < 1:
+        return None
+    t_target = np.linspace(ik_time[0], ik_time[-1], T).astype(np.float64)
+    # Better alternative: pick t_target so its spacing equals median ik_dt,
+    # then slice. But for COM interpolation, near-uniform spacing matters more
+    # than exact alignment.
+
+    com = _load_com_features_aligned(subj_dir, t_target)
+    if com is None:
+        return None
+
+    if cfg.get("uses_pelvis_rel"):
+        # Pelvis world position from raw IK (not zero-centered).
+        # ik_df is already loaded above. pelvis_tx/ty/tz are at the trial's
+        # native ik_time grid; interpolate onto t_target.
+        pelvis_raw = np.column_stack([
+            ik_df["pelvis_tx"].values,
+            ik_df["pelvis_ty"].values,
+            ik_df["pelvis_tz"].values,
+        ])
+        pelvis_pos = np.column_stack([
+            np.interp(t_target, ik_time, pelvis_raw[:, j]) for j in range(3)
+        ]).astype(np.float32)                               # [T, 3]
+        rel_com = com["com_pos"] - pelvis_pos               # COM relative to pelvis
+        rel_r = com["calcn_r_pos"] - pelvis_pos             # right foot relative to pelvis
+        rel_l = com["calcn_l_pos"] - pelvis_pos             # left foot relative to pelvis
+        parts = [q, rel_com, rel_r, rel_l]                  # [T, 16+3+3+3=25]
+    else:
+        # qvcomrel: COM velocity + foot positions relative to COM
+        v_com = com["com_vel"]                              # [T, 3]
+        rel_r = com["com_pos"] - com["calcn_r_pos"]         # [T, 3]
+        rel_l = com["com_pos"] - com["calcn_l_pos"]         # [T, 3]
+        parts = [q, v_com, rel_r, rel_l]                    # [T, 16+3+3+3=25]
+    if cfg["include_height"]:
+        parts.append(np.full((T, 1), mass, dtype=np.float32))
+        parts.append(np.full((T, 1), height_m, dtype=np.float32))
+
+    feat = np.hstack(parts).astype(np.float32)
+    assert feat.shape[1] == cfg["per_frame_ch"], \
+        f"Feature width {feat.shape[1]} != expected {cfg['per_frame_ch']}"
+    return feat, labels.astype(np.float32), mass
+
+
+def _windowize(feat, window, replicate_q=False, q_dim=16):
+    """Build a [T, window * F] array where each row k contains the flattened
+    window of `window` frames centered on k, with edge replication at boundaries.
+    `feat` is [T, F]; the prediction target for each row is still frame k's label.
+
+    If replicate_q=True, the first q_dim channels (joint angles) at every frame
+    within the window are overwritten by the center frame's q values, so the
+    window contains only one snapshot of joint posture — the position/velocity
+    channels still vary across the window normally.
+    """
+    if window <= 1:
+        return feat
+    T, F = feat.shape
+    half = window // 2     # if window=20, half=10 (10 past + 10 future, with current at index 10)
+    out = np.zeros((T, window, F), dtype=feat.dtype)
+    for offset in range(window):
+        # Relative position within the window: index k of the window samples frame (k - half + offset)
+        rel = offset - half
+        src_idx = np.clip(np.arange(T) + rel, 0, T - 1)
+        out[:, offset, :] = feat[src_idx]
+    if replicate_q:
+        # Replace q (channels 0:q_dim) at every window position with the
+        # center-frame q. Broadcasts feat[:, :q_dim] (shape [T, q_dim]) across
+        # the window axis.
+        out[:, :, :q_dim] = feat[:, np.newaxis, :q_dim]
+    return out.reshape(T, window * F)
+
+
+def _windowize_positions_only(feat, window, q_dim=16, n_pos=9):
+    """For variants where only the position channels are windowed; q and any
+    extras (mass, height) are taken from the center frame only.
+
+    Layout of `feat` per frame: [q (q_dim), positions (n_pos), extras (rest)].
+    Output per sample: [q (q_dim), windowed_positions (window*n_pos), extras (rest)].
+
+    For window=20, q_dim=16, n_pos=9, extras=2 → 16 + 180 + 2 = 198 channels.
+    """
+    if window <= 1:
+        return feat
+    T, F = feat.shape
+    extras_size = F - q_dim - n_pos
+    half = window // 2
+    pos_start = q_dim
+    pos_end = q_dim + n_pos
+    pos_windowed = np.zeros((T, window, n_pos), dtype=feat.dtype)
+    for offset in range(window):
+        rel = offset - half
+        src_idx = np.clip(np.arange(T) + rel, 0, T - 1)
+        pos_windowed[:, offset, :] = feat[src_idx, pos_start:pos_end]
+    pos_flat = pos_windowed.reshape(T, window * n_pos)
+    q_center = feat[:, :q_dim]
+    extras_center = feat[:, pos_end:] if extras_size > 0 else np.zeros((T, 0), dtype=feat.dtype)
+    return np.hstack([q_center, pos_flat, extras_center])
+
+
 class FrameDataset(Dataset):
     """
     Flattens each subject's full sequence into individual frames.
@@ -159,8 +399,31 @@ class FrameDataset(Dataset):
         import json as _json
         cfg = INPUT_SETS[input_set]
         n_features = feature_count(input_set)
+        is_com = cfg.get("uses_com", False)
+        window = cfg.get("window", 1)
         chunks_in, chunks_out = [], []
+
         for subj_dir in subject_dirs:
+            # ─── COM-based variants take a separate code path ───
+            if is_com:
+                built = _build_com_features(subj_dir, cfg,
+                                            max_peak_bw=max_peak_bw,
+                                            min_length=min_length,
+                                            predict_moment=predict_moment)
+                if built is None:
+                    continue
+                feat, labels, mass = built
+                if window > 1:
+                    if cfg.get("window_only_positions", False):
+                        feat = _windowize_positions_only(feat, window)
+                    else:
+                        feat = _windowize(feat, window,
+                                          replicate_q=cfg.get("replicate_q", False))
+                chunks_in.append(feat)
+                chunks_out.append(labels)
+                continue
+
+            # ─── Existing (q, F, ...) variants ───
             r = load_subject(subj_dir,
                              lower_body_only=True,
                              clean_features=True,
@@ -200,6 +463,7 @@ class FrameDataset(Dataset):
                 inputs = np.hstack([inputs, np.column_stack(extras)])
             chunks_in.append(inputs.astype(np.float32))
             chunks_out.append(labels.astype(np.float32))
+
         if chunks_in:
             self.frames_in = np.concatenate(chunks_in, axis=0)
             self.frames_out = np.concatenate(chunks_out, axis=0)
@@ -249,7 +513,8 @@ def _split_dirs(subject_dirs, train_size, seed):
 
 
 def train(activity='static', filter_flat=True, dataset=None, exclude=None,
-          max_peak_bw=6.0, seed=SEED, input_set='full', dq_method='central'):
+          max_peak_bw=6.0, seed=SEED, input_set='full', dq_method='central',
+          epochs=None, lr_patience=None):
     """
     Train MLP on per-frame data from one or both activities.
       activity='static':  ./jcf/full_duration/training/static/  (for posture optimization)
@@ -357,10 +622,12 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: JCF_MLP {n_params:,} params (hidden={HIDDEN}, dropout={DROPOUT})")
 
+    n_epochs = epochs if epochs is not None else EPOCHS
+    sched_patience = lr_patience if lr_patience is not None else 3
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE,
                                  weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, patience=3, factor=0.5)
+        optimizer, patience=sched_patience, factor=0.5)
 
     def loss_fn(pred, target):
         # Plain MSE + magnitude-weighted force MSE.
@@ -373,7 +640,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         return mse + 0.5 * weighted
 
     best_val = float("inf")
-    for epoch in range(EPOCHS):
+    for epoch in range(n_epochs):
         model.train()
         train_loss = 0.0
         n_train = 0
@@ -402,7 +669,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         scheduler.step(val_loss)
 
         lr = optimizer.param_groups[0]["lr"]
-        print(f"Epoch {epoch+1:3d}/{EPOCHS} | train: {train_loss:.6f} | "
+        print(f"Epoch {epoch+1:3d}/{n_epochs} | train: {train_loss:.6f} | "
               f"val: {val_loss:.6f} | lr: {lr:.1e}")
 
         if val_loss < best_val:
@@ -469,9 +736,18 @@ if __name__ == "__main__":
                         "(default). 'forward' uses William's "
                         "(q_k - q_{k-1})/dt — matches a real-time forward "
                         "finite-difference deployment.")
+    p.add_argument("--epochs", type=int, default=None,
+                   help=f"Number of training epochs (default {EPOCHS}). "
+                        f"Use more if val loss is still dropping at the end.")
+    p.add_argument("--lr-patience", type=int, default=None,
+                   help="ReduceLROnPlateau patience (default 3). Higher = "
+                        "scheduler waits longer before halving LR, so the model "
+                        "trains longer at each LR rung. Useful when increasing "
+                        "--epochs.")
     args = p.parse_args()
     train(activity=args.activity,
           filter_flat=not args.no_flat_filter,
           dataset=args.dataset, exclude=args.exclude,
           max_peak_bw=args.max_peak, seed=args.seed,
-          input_set=args.input_set, dq_method=args.dq_method)
+          input_set=args.input_set, dq_method=args.dq_method,
+          epochs=args.epochs, lr_patience=args.lr_patience)
