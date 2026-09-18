@@ -58,15 +58,20 @@ import torch.nn as nn
 # ─── Model architecture (must match training) ────────────────────────────────
 
 class _JCF_MLP(nn.Module):
-    def __init__(self, n_features, n_outputs=4, hidden=128, dropout=0.0):
+    def __init__(self, n_features, n_outputs=4, hidden=128, dropout=0.0,
+                 activation='relu'):
         super().__init__()
+        act_map = {'relu': nn.ReLU, 'silu': nn.SiLU}
+        if activation not in act_map:
+            raise ValueError(f"activation must be one of {list(act_map)}; got {activation!r}")
+        act_layer = act_map[activation]
         layers = []
         in_dim = n_features
         for _ in range(3):
             layers += [
                 nn.Linear(in_dim, hidden),
                 nn.LayerNorm(hidden),
-                nn.ReLU(),
+                act_layer(),
                 nn.Dropout(dropout),
             ]
             in_dim = hidden
@@ -91,16 +96,20 @@ PELVIS_TX_COLS = [3, 4, 5]   # pelvis translation channels — zero-center per c
 
 N_JOINTS = 16
 N_POS_CH = 9       # rel_com (3) + rel_r (3) + rel_l (3) per frame
+N_POS_CH_CONTACT = 11   # + right-contact (1) + left-contact (1) for the contact variant
 WINDOW = 20
 N_OUTPUTS = 4      # Fx, Fy, Fz, Mx
 
-# Feature layout per sample (198 channels):
+# Feature layout per sample (198 channels, base variant):
 #   [0    : 16 ]  q (instantaneous, center-frame)
 #   [16   : 196]  windowed positions, shape (20, 9) flattened
 #                 -> frame-major: f0_relcom(3), f0_relr(3), f0_rell(3),
 #                                 f1_relcom(3), ... f19_rell(3)
 #   [196  : 198]  mass, height (instantaneous)
-N_FEATURES = N_JOINTS + WINDOW * N_POS_CH + 2   # 198
+# The contact variant windows 11 channels per frame (adds R/L contact flags),
+# giving 16 + 20*11 + 2 = 238.
+N_FEATURES = N_JOINTS + WINDOW * N_POS_CH + 2            # 198
+N_FEATURES_CONTACT = N_JOINTS + WINDOW * N_POS_CH_CONTACT + 2   # 238
 
 
 class JCFPostureSurrogate:
@@ -116,7 +125,13 @@ class JCFPostureSurrogate:
     DEFAULT_ALPHA = 0.5
     DEFAULT_D_M = 0.045
 
-    EXPECTED_INPUT_SET = "qinst_pelvisrel_winpos_w20"
+    # Base variants share a 198-channel feature shape; the contact variant adds
+    # two windowed R/L contact flags for 238 channels.
+    SUPPORTED_INPUT_SETS = (
+        "qinst_pelvisrel_winpos_w20",          # per-trial centering
+        "qinst_pelvisrel_winpos_winctr_w20",   # per 20-frame-window centering
+        "qinst_pelvisrel_winpos_contact_w20",  # + windowed R/L contact flags
+    )
 
     def __init__(self, checkpoint_path, device=None):
         if device is None:
@@ -126,24 +141,33 @@ class JCFPostureSurrogate:
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
         input_set = ckpt.get("input_set", None)
-        if input_set != self.EXPECTED_INPUT_SET:
+        if input_set not in self.SUPPORTED_INPUT_SETS:
             raise ValueError(
-                f"Expected input_set='{self.EXPECTED_INPUT_SET}' but checkpoint "
+                f"Expected input_set in {self.SUPPORTED_INPUT_SETS} but checkpoint "
                 f"has input_set='{input_set}'. Use a different inference module "
                 f"for that variant."
             )
+        self.input_set = input_set
+        self.pelvis_per_window_centering = input_set.endswith("_winctr_w20")
+        self.include_contact = input_set == "qinst_pelvisrel_winpos_contact_w20"
+        self.n_pos_ch = N_POS_CH_CONTACT if self.include_contact else N_POS_CH
 
         self.n_features = ckpt["n_features"]
-        if self.n_features != N_FEATURES:
+        expected_features = N_FEATURES_CONTACT if self.include_contact else N_FEATURES
+        if self.n_features != expected_features:
             raise ValueError(
-                f"Expected n_features={N_FEATURES}, got {self.n_features}"
+                f"Expected n_features={expected_features} for input_set "
+                f"'{input_set}', got {self.n_features}"
             )
 
+        # Older checkpoints don't store 'activation'; assume ReLU for back-compat.
+        self.activation = ckpt.get("activation", "relu")
         self.model = _JCF_MLP(
             n_features=self.n_features,
             n_outputs=ckpt.get("n_outputs", N_OUTPUTS),
             hidden=ckpt.get("hidden", 128),
             dropout=0.0,
+            activation=self.activation,
         )
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.to(device).eval()
@@ -156,15 +180,23 @@ class JCFPostureSurrogate:
     # ─── Feature construction ────────────────────────────────────────────────
 
     def _build_feature_windowed(self, joint_angles, com_rel_w, r_rel_w, l_rel_w,
-                                mass_kg, height_m):
+                                mass_kg, height_m, skip_pelvis_centering=False,
+                                r_contact_w=None, l_contact_w=None):
         """
-        Build the (N, 198) feature tensor.
+        Build the (N, 198) or (N, 238) feature tensor.
 
         Shapes accepted (single-posture form, then batched form):
             joint_angles : (16,)        or (N, 16)
             com_rel_w    : (20, 3)      or (N, 20, 3)
             r_rel_w      : (20, 3)      or (N, 20, 3)
             l_rel_w      : (20, 3)      or (N, 20, 3)
+            r_contact_w  : (20,)        or (N, 20)   [contact variant only]
+            l_contact_w  : (20,)        or (N, 20)   [contact variant only]
+
+        skip_pelvis_centering: if True, the caller has already centered
+            pelvis_tx/ty/tz in `joint_angles` and the internal batch-mean
+            subtraction is skipped. Use this when you want per-window (or
+            any other externally-defined) centering instead of per-batch.
         """
         ja = np.asarray(joint_angles, dtype=np.float64)
         cw = np.asarray(com_rel_w, dtype=np.float64)
@@ -186,17 +218,47 @@ class JCFPostureSurrogate:
                     f"{name} must be (20, 3) or (N, 20, 3); got {arr.shape}"
                 )
 
+        if self.include_contact:
+            if r_contact_w is None or l_contact_w is None:
+                raise ValueError(
+                    "This is a contact-flag checkpoint; r_contact_window and "
+                    "l_contact_window are required."
+                )
+            rc = np.asarray(r_contact_w, dtype=np.float64)
+            lc = np.asarray(l_contact_w, dtype=np.float64)
+            if rc.ndim == 1:
+                rc = rc[None, :]
+                lc = lc[None, :]
+            for name, arr in [("r_contact_window", rc), ("l_contact_window", lc)]:
+                if arr.shape != (N, WINDOW):
+                    raise ValueError(
+                        f"{name} must be (20,) or (N, 20); got {arr.shape}"
+                    )
+
         # Zero-center pelvis translations (matches training-time clean_features).
         # For a single posture this drives pelvis_tx/ty/tz to 0 — correct, since
-        # the model never sees absolute lab position.
+        # the model never sees absolute lab position. Caller can opt out via
+        # skip_pelvis_centering=True if they've already centered externally
+        # (e.g. per 20-frame window for sparse-Jacobian optimizers).
+        #
+        # For *_winctr_* checkpoints, the model was trained with per-window
+        # centering applied at sample-construction time. Internal batch-mean
+        # centering would double-center; the caller is responsible for
+        # supplying per-window-centered pelvis_tx/ty/tz, so we always skip.
         ja = ja.copy()
-        ja[:, PELVIS_TX_COLS] -= ja[:, PELVIS_TX_COLS].mean(axis=0, keepdims=True)
+        do_center = (not skip_pelvis_centering) and (not self.pelvis_per_window_centering)
+        if do_center:
+            ja[:, PELVIS_TX_COLS] -= ja[:, PELVIS_TX_COLS].mean(axis=0, keepdims=True)
 
-        # Stack positions per frame as (rel_com, rel_r, rel_l) → (N, 20, 9),
-        # then flatten frame-major to (N, 180). Order matches _windowize_positions_only
-        # in train_mlp.py: pos_windowed.reshape(T, window * n_pos).
-        per_frame = np.concatenate([cw, rw, lw], axis=-1)         # (N, 20, 9)
-        pos_flat = per_frame.reshape(N, WINDOW * N_POS_CH)        # (N, 180)
+        # Stack positions per frame as (rel_com, rel_r, rel_l[, Rc, Lc]) →
+        # (N, 20, n_pos), then flatten frame-major. Order matches
+        # _windowize_positions_only in train_mlp.py: reshape(T, window * n_pos),
+        # and _build_com_features appends contact flags after rel_l.
+        blocks = [cw, rw, lw]
+        if self.include_contact:
+            blocks += [rc[..., None], lc[..., None]]              # (N, 20, 1) each
+        per_frame = np.concatenate(blocks, axis=-1)               # (N, 20, n_pos)
+        pos_flat = per_frame.reshape(N, WINDOW * self.n_pos_ch)
 
         mass_col = np.full((N, 1), mass_kg, dtype=np.float64)
         height_col = np.full((N, 1), height_m, dtype=np.float64)
@@ -211,7 +273,9 @@ class JCFPostureSurrogate:
     @torch.no_grad()
     def predict_windowed(self, joint_angles, com_rel_window,
                          calcn_r_rel_window, calcn_l_rel_window,
-                         mass_kg, height_m, alpha=None, d_m=None):
+                         mass_kg, height_m, alpha=None, d_m=None,
+                         skip_pelvis_centering=False,
+                         r_contact_window=None, l_contact_window=None):
         """
         Predict knee JCF + KAM for a posture with a 20-frame position history.
 
@@ -220,6 +284,11 @@ class JCFPostureSurrogate:
         calcn_r_rel_window: (20, 3) or (N, 20, 3). right foot - pelvis.
         calcn_l_rel_window: (20, 3) or (N, 20, 3). left foot - pelvis.
         mass_kg, height_m : scalars (one subject per call).
+        skip_pelvis_centering: pass True if you've already centered
+            joint_angles[..., 3:6] externally (e.g. per 20-frame window).
+        r_contact_window, l_contact_window: (20,) or (N, 20) binary
+            in-contact flags per frame. Required for the contact variant;
+            ignored otherwise.
 
         Returns dict (scalars for single input, shape (N,) for batched):
             fx, fy, fz : forces in BW
@@ -233,6 +302,8 @@ class JCFPostureSurrogate:
         x = self._build_feature_windowed(
             joint_angles, com_rel_window, calcn_r_rel_window, calcn_l_rel_window,
             mass_kg, height_m,
+            skip_pelvis_centering=skip_pelvis_centering,
+            r_contact_w=r_contact_window, l_contact_w=l_contact_window,
         )
         x = (x - self.input_mean) / self.input_std
         out = self.model(x).cpu().numpy()
@@ -256,7 +327,8 @@ class JCFPostureSurrogate:
 
     def predict_static(self, joint_angles, com_rel_pelvis,
                        calcn_r_rel_pelvis, calcn_l_rel_pelvis,
-                       mass_kg, height_m, alpha=None, d_m=None):
+                       mass_kg, height_m, alpha=None, d_m=None,
+                       r_contact=None, l_contact=None):
         """
         Predict for a single static posture (no history). The position snapshot
         is replicated across the 20-frame window internally — matches how the
@@ -267,6 +339,10 @@ class JCFPostureSurrogate:
         calcn_r_rel_pelvis : (3,)  or (N, 3).
         calcn_l_rel_pelvis : (3,)  or (N, 3).
         mass_kg, height_m  : scalars.
+        r_contact, l_contact: scalar (or (N,)) binary flags, replicated across
+            the window. Required for the contact variant; a static posture is
+            assumed to hold the same stance state across the window. Defaults to
+            both feet in contact (1.0) if not given.
 
         Returns same dict as predict_windowed().
         """
@@ -275,19 +351,31 @@ class JCFPostureSurrogate:
         pr = np.asarray(calcn_r_rel_pelvis, dtype=np.float64)
         pl = np.asarray(calcn_l_rel_pelvis, dtype=np.float64)
 
+        rc_w = lc_w = None
         if ja.ndim == 1:
             pc_w = np.broadcast_to(pc[None, :], (WINDOW, 3)).copy()
             pr_w = np.broadcast_to(pr[None, :], (WINDOW, 3)).copy()
             pl_w = np.broadcast_to(pl[None, :], (WINDOW, 3)).copy()
+            if self.include_contact:
+                rc = 1.0 if r_contact is None else float(r_contact)
+                lc = 1.0 if l_contact is None else float(l_contact)
+                rc_w = np.full(WINDOW, rc, dtype=np.float64)
+                lc_w = np.full(WINDOW, lc, dtype=np.float64)
         else:
             N = ja.shape[0]
             pc_w = np.broadcast_to(pc[:, None, :], (N, WINDOW, 3)).copy()
             pr_w = np.broadcast_to(pr[:, None, :], (N, WINDOW, 3)).copy()
             pl_w = np.broadcast_to(pl[:, None, :], (N, WINDOW, 3)).copy()
+            if self.include_contact:
+                rc = np.ones(N) if r_contact is None else np.asarray(r_contact, float)
+                lc = np.ones(N) if l_contact is None else np.asarray(l_contact, float)
+                rc_w = np.broadcast_to(rc[:, None], (N, WINDOW)).copy()
+                lc_w = np.broadcast_to(lc[:, None], (N, WINDOW)).copy()
 
         return self.predict_windowed(
             joint_angles, pc_w, pr_w, pl_w, mass_kg, height_m,
             alpha=alpha, d_m=d_m,
+            r_contact_window=rc_w, l_contact_window=lc_w,
         )
 
 
@@ -300,7 +388,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     predictor = JCFPostureSurrogate(sys.argv[1])
-    print(f"Loaded qinst_pelvisrel_winpos_w20 checkpoint "
+    print(f"Loaded {predictor.input_set} checkpoint "
           f"(epoch={predictor.epoch+1}, val_loss={predictor.val_loss:.6f})")
     print(f"Device: {predictor.device}, n_features={predictor.n_features}")
 
@@ -341,7 +429,10 @@ if __name__ == "__main__":
     r_w += rng.normal(0, 0.05, r_w.shape)
     l_w = np.broadcast_to(p_l[None, :], (WINDOW, 3)).copy()
     l_w += rng.normal(0, 0.05, l_w.shape)
-    out_w = predictor.predict_windowed(q, com_w, r_w, l_w, mass_kg, height_m)
+    kw_c = {}
+    if predictor.include_contact:
+        kw_c = dict(r_contact_window=np.ones(WINDOW), l_contact_window=np.ones(WINDOW))
+    out_w = predictor.predict_windowed(q, com_w, r_w, l_w, mass_kg, height_m, **kw_c)
     print(f"\nWalking (with 20-frame position window):")
     print(f"  fy (BW):         {out_w['fy']:+.4f}")
     print(f"  f_medial (BW):   {out_w['f_medial']:+.4f}")

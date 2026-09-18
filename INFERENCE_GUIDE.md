@@ -1,5 +1,8 @@
 # Inference Guide — `n_d05_m_s` Static-Aware Knee JCF Model
 
+> **Looking for the GRF-free posture-optimizer model (MLP with contact flags)?**
+> See `INFERENCE_GUIDE_MLP.md`. This document covers the streaming BiCNN, which requires measured GRF.
+
 This document describes how to integrate and run the trained knee JCF surrogate model. The model is trained jointly on walking and quasi-static postures from the AddBiomechanics database (Carter, Moore, Lencioni/Tiziana, Falisse subsets), and the same predictor handles both regimes. All inference logic lives in a single self-contained module: **`inference.py`**.
 
 ## Files needed for integration
