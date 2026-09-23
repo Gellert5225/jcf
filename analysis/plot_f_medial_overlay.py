@@ -14,7 +14,7 @@ BiCNN also applies (and probably more strongly) to the GRF-free MLP.
 Usage:
     conda run -n jcf python analysis/plot_f_medial_overlay.py \
         --trial ./jcf/full_duration/training/walking/carter_P003_split0_t04 \
-        --ckpt ./jcf/full_duration/training/static/best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt \
+        --ckpt ./models/mlp-grffree-base/mlp-grffree-base.pt \
         --out /tmp/f_medial_overlay.png
 """
 import argparse

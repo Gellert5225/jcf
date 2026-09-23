@@ -47,7 +47,7 @@ def main():
     ap.add_argument("--csv", required=True, help="exported trajectory CSV")
     ap.add_argument(
         "--ckpt",
-        default="./jcf/full_duration/training/static/best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt",
+        default="./models/mlp-grffree-contact/mlp-grffree-contact.pt",
     )
     ap.add_argument("--mass", type=float, default=70.0, help="kg")
     ap.add_argument("--height", type=float, default=1.75, help="m")

@@ -17,7 +17,7 @@ For a single-posture optimizer query, the position window collapses to a snapsho
 | File | Purpose |
 |---|---|
 | `inference_posture_surrogate.py` | Self-contained inference module |
-| `best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt` | Trained checkpoint (~0.2 MB) |
+| `mlp-grffree-base.pt` | Trained checkpoint (~0.2 MB) |
 
 Drop both files into your project directory. Only dependencies are `numpy` and `torch`.
 
@@ -91,7 +91,7 @@ The predictor returns a dict with these keys (scalars for a single posture query
 from inference_posture_surrogate import JCFPostureSurrogate
 
 predictor = JCFPostureSurrogate(
-    "best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt"
+    "mlp-grffree-base.pt"
 )
 
 out = predictor.predict_static(
@@ -191,7 +191,7 @@ Correlation (Pearson r) on walking F_y: 0.899 overall, 0.948 within-lab Carter, 
 ## Smoke test
 
 ```bash
-python inference_posture_surrogate.py best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt
+python inference_posture_surrogate.py mlp-grffree-base.pt
 ```
 
 Should print sensible numbers for a synthetic upright-stance posture (axial force around −0.8 BW per knee, medial proxy around +0.3 BW). If you get NaNs or absurd magnitudes, the model is being fed inputs in the wrong units or order.

@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inference import JCFPredictor, JOINT_ORDER, preprocess
 from train_cnn import load_subject, JCF_CNN_v2
 
-CKPT = "./jcf/full_duration/training/walking/best_model_n_d05_m_s2_s2.pt"
+CKPT = "./models/bicnn-grf-streaming/bicnn-grf-streaming.pt"
 
 # Test trials: a mix of walking and quasi-static, across labs.
 TEST_TRIALS = [

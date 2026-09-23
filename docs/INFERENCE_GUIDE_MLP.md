@@ -9,10 +9,17 @@ foot-contact flags. For the streaming BiCNN that consumes measured GRF, see `INF
 | File | Purpose |
 |---|---|
 | `inference_posture_surrogate.py` | Self-contained module: model class, feature construction, `JCFPostureSurrogate` |
-| `best_model_mlp_both_qinst_pelvisrel_winpos_contact_w20_fmW0p5.pt` | **Recommended** checkpoint (238-channel input, contact flags) |
+| `mlp-grffree-contact.pt` | **Recommended** checkpoint (in `models/mlp-grffree-contact/`; 238-channel input, contact flags). Run file: `runs/mlp/mlp-grffree-contact.pt` |
 
-Dependencies: `numpy`, `torch`. The same module also loads the two older checkpoints
-(`…_winpos_w20_fmW0p5.pt` baseline, `…_winctr_w20_fmW0p5.pt`) and adapts automatically from the
+Dependencies: `numpy`, `torch`.
+
+Get the checkpoint from Hugging Face (private during review — `hf auth login` first):
+
+```python
+from huggingface_hub import hf_hub_download
+ckpt = hf_hub_download("gellert5225/jcf-knee-surrogates", "mlp-grffree-contact/mlp-grffree-contact.pt", revision="v1-isrr2026")
+``` The same module also loads the two older checkpoints
+(`mlp-grffree-base.pt` and the archived runs under `models/runs/mlp/`) and adapts automatically from the
 `input_set` tag stored in the file.
 
 ## Which checkpoint
@@ -24,15 +31,15 @@ terms), so they are omitted.
 
 | Checkpoint | Input | Held-out F_medial MAE | Spike recovered | Notes |
 |---|---|---|---|---|
-| `…_contact_w20_fmW0p5.pt` | 238 ch: + windowed R/L contact flags | **0.195 BW** | **91 %** | Most accurate on real gait; better than `…_winpos_w20.pt` on 264 of 323 trials, M_x error −31 %. See *Known issue* below. |
-| `…_winpos_w20.pt` | 198 ch, plain MSE | 0.268 BW | 81 % | The model used for the paper's optimization results. No stance information. |
-| `…_winpos_w20_fmW0p5.pt` | 198 ch | 0.311 BW | 61 % | The file on disk is a 2-epoch checkpoint — do not use. |
-| `…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | — | — | Not recommended (see *Pelvis centering*). |
+| `mlp-grffree-contact.pt` | 238 ch: + windowed R/L contact flags | **0.195 BW** | **91 %** | Most accurate on real gait; better than `mlp-grffree-base.pt` on 264 of 323 trials, M_x error −31 %. See *Known issue* below. |
+| `mlp-grffree-base.pt` | 198 ch, plain MSE | 0.268 BW | 81 % | The model used for the paper's optimization results. No stance information. |
+| `runs/mlp/incomplete/…_w20_fmW0p5.pt` | 198 ch | 0.311 BW | 61 % | The file on disk is a 2-epoch checkpoint — do not use. |
+| `runs/mlp/…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | — | — | Not recommended (see *Pelvis centering*). |
 
 Evidence for the held-out numbers: `figures/heldout/contact_vs_baseline_heldout_summary.png` (aggregate), `figures/heldout/contact_vs_baseline_heldout_carterP019.png` (one subject), and the table twin `figures/heldout/contact_vs_baseline_heldout_summary.csv`.
 
 **Known issue (open):** on a synthetic optimizer trajectory, the contact checkpoint returned
-peak |F_medial| ≈ 0.67 BW where `…_winpos_w20.pt` returned substantially higher values. Neither
+peak |F_medial| ≈ 0.67 BW where `mlp-grffree-base.pt` returned substantially higher values. Neither
 model has been validated against OpenSim ground truth on that kind of trajectory yet; until that
 comparison is done, treat the two as bracketing the answer rather than one being correct.
 
@@ -101,7 +108,7 @@ which is what lets the model place the push-off medial spike.
 import numpy as np
 from inference_posture_surrogate import JCFPostureSurrogate
 
-m = JCFPostureSurrogate("best_model_mlp_both_qinst_pelvisrel_winpos_contact_w20_fmW0p5.pt")
+m = JCFPostureSurrogate("mlp-grffree-contact.pt")
 # m.include_contact -> True, m.n_features -> 238
 
 out = m.predict_windowed(
@@ -209,13 +216,13 @@ q reordering, contact flags from foot wrenches, windowing) and plots the result:
 
 ```bash
 python infer_trajectory_csv.py --csv my_trajectory.csv \
-    --ckpt best_model_mlp_both_qinst_pelvisrel_winpos_contact_w20_fmW0p5.pt --mass 75 --height 1.7
+    --ckpt mlp-grffree-contact.pt --mass 75 --height 1.7
 ```
 
 Built-in smoke test on synthetic inputs:
 
 ```bash
-python inference_posture_surrogate.py best_model_mlp_both_qinst_pelvisrel_winpos_contact_w20_fmW0p5.pt
+python inference_posture_surrogate.py mlp-grffree-contact.pt
 ```
 
 ## Performance

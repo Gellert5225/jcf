@@ -10,7 +10,7 @@ buffering, no window replication, no torch DataLoader.
 Usage:
     from inference_static_simple import JCFStaticPredictor
 
-    predictor = JCFStaticPredictor("best_model_mlp_both_qfmh_forward.pt")
+    predictor = JCFStaticPredictor("models/runs/mlp/best_model_mlp_both_qfmh_forward.pt")
     out = predictor.predict(
         joint_angles=q,          # shape (16,) in JOINT_ORDER, radians
         grf=F,                   # shape (6,) in Newtons (r_vx,r_vy,r_vz,l_vx,l_vy,l_vz)

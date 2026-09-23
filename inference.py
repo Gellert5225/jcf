@@ -11,7 +11,7 @@ forces. The same predictor handles both walking and quasi-static postures
 Usage:
     from inference import JCFPredictor
 
-    predictor = JCFPredictor("best_model_n_d05_m_s2_s2.pt")
+    predictor = JCFPredictor("models/bicnn-grf-streaming/bicnn-grf-streaming.pt")
     out = predictor.predict(joint_angles, grf, mass_kg=70.0, height_m=1.75)
     # out["fy"]: axial force in BW (compressive → negative)
     # out["mx"]: external KAM (M_add) in BW*Height units (medial-loading-positive)

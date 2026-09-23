@@ -32,7 +32,7 @@ def test(exp=None, calibrate_peaks=0, calibrate_mode='trial', dataset=None, excl
             cal_tag += 's'
         suffix += cal_tag
     model_name = f"best_model_{exp}{seed_suffix}.pt" if exp else f"best_model{seed_suffix}.pt"
-    model_path = f"./jcf/full_duration/training/walking/{model_name}"
+    model_path = f"./models/runs/bicnn/{model_name}"
 
     # Load checkpoint
     checkpoint = torch.load(model_path, map_location=DEVICE, weights_only=True)

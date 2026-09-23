@@ -10,7 +10,7 @@ This document describes how to integrate and run the trained knee JCF surrogate 
 | File | Purpose |
 |---|---|
 | `inference.py` | Self-contained inference module (model class, preprocessing, `JCFPredictor`) |
-| `best_model_n_d05_m_s2_s2.pt` | Trained model checkpoint (~3 MB) |
+| `bicnn-grf-streaming.pt` | Trained checkpoint (in `models/bicnn-grf-streaming/`, ~8 MB) |
 
 That's it. Drop both files into your project directory. The only Python dependencies are `numpy` and `torch`.
 
@@ -72,7 +72,7 @@ GRF should be in **Newtons**. The preprocessor normalizes by body weight interna
 ```python
 from inference import JCFPredictor
 
-predictor = JCFPredictor("best_model_n_d05_m_s2_s2.pt")
+predictor = JCFPredictor("bicnn-grf-streaming.pt")
 
 out = predictor.predict(
     joint_angles,    # [T, 16] radians
@@ -190,7 +190,7 @@ Model size: ~720K parameters, ~2.9 MB checkpoint. The `JCFPredictor` automatical
 To verify the integration works on synthetic data:
 
 ```bash
-python inference.py best_model_n_d05_m_s2_s2.pt
+python inference.py bicnn-grf-streaming.pt
 ```
 
 This loads the checkpoint, runs inference on 5 seconds of fake data, and prints output ranges. If it completes without errors, the integration is correct.

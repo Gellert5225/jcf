@@ -40,6 +40,7 @@ from sklearn.model_selection import train_test_split
 
 SEED = 1
 DATA_ROOT = "./jcf/full_duration/training/walking"
+CKPT_ROOT = "./models/runs/bicnn"   # where training writes checkpoints; curated models live in ./models/<name>/
 BATCH_SIZE = 8          # full sequences per batch (pad to max length)
 EPOCHS = 300
 LEARNING_RATE = 5e-4
@@ -1415,6 +1416,7 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
 
         # ── Save best ──
         model_name = f'best_model_{EXP}{seed_suffix}.pt' if EXP else f'best_model{seed_suffix}.pt'
+        os.makedirs(CKPT_ROOT, exist_ok=True)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
@@ -1439,11 +1441,11 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
                 'predict_moment': predict_moment,
                 'predict_flexion_moment': predict_flexion_moment,
                 'n_outputs': n_outputs,
-            }, os.path.join(DATA_ROOT, model_name))
+            }, os.path.join(CKPT_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
     print(f"\nTraining complete. Best val MSE: {best_val_loss:.6f}")
-    print(f"Model saved to {DATA_ROOT}/{model_name}")
+    print(f"Model saved to {CKPT_ROOT}/{model_name}")
 
 
 if __name__ == '__main__':

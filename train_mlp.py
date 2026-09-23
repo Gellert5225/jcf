@@ -35,6 +35,7 @@ DATA_ROOTS = {
     "static":  "./jcf/full_duration/training/static",
     "walking": "./jcf/full_duration/training/walking",
 }
+CKPT_ROOT = "./models/runs/mlp"   # where training writes checkpoints; curated models live in ./models/<name>/
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 4096
@@ -630,7 +631,8 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
     # Collect train/val dirs per activity
     train_dirs_by = {}
     val_dirs_by = {}
-    output_root = None
+    output_root = CKPT_ROOT
+    os.makedirs(CKPT_ROOT, exist_ok=True)
     for act in (['static', 'walking'] if activity == 'both' else [activity]):
         root = DATA_ROOTS[act]
         if not os.path.isdir(root):
@@ -647,7 +649,6 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         val_dirs_by[act] = vd
         print(f"[{act}] train: {ns_train} subjects ({len(td)} trials), "
               f"val: {ns_val} subjects ({len(vd)} trials)")
-        output_root = root if output_root is None else output_root
 
     if not train_dirs_by:
         print("No training data found.")

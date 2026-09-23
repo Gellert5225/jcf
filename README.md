@@ -25,7 +25,8 @@ All scripts are run from the repository root (data paths are relative to `./jcf/
 | `docs/` | Integration guides and project notes |
 | `figures/` | Generated figures: `heldout/` (surrogate evaluation), `gt/` (ground-truth analyses), `legacy/` — git-ignored |
 | `assets/` | `Rajagopal2015.urdf` |
-| `jcf/` | Processed trials and checkpoints (`jcf/full_duration/training/{static,walking}/`) — git-ignored |
+| `models/` | Curated checkpoints (`mlp-grffree-contact/`, `mlp-grffree-base/`, `bicnn-grf-streaming/`, each with a model card) and raw training runs (`runs/mlp/`, `runs/bicnn/`); `.pt` files git-ignored — see `models/README.md` |
+| `jcf/` | Processed trials (`jcf/full_duration/training/{static,walking}/`) — git-ignored |
 | `with_arm/` | Raw AddBiomechanics `.b3d` data — git-ignored |
 | `paper/` | ISRR manuscript (LaTeX) — git-ignored |
 
@@ -73,6 +74,22 @@ jcf/
 └── testing/            # same structure
 ```
 
+## Getting the processed data
+
+The OpenSim outputs used for training (IK, GRF, Static Optimization, Joint Reaction labels — ~45 GB on
+disk) are hosted as a private Hugging Face dataset, `gellert5225/jcf-knee-labels` (revision `v1-isrr2026`).
+`jcf/` is git-ignored; reconstruct it with:
+
+```bash
+hf auth login                                   # once; needs read access to the dataset
+python pipeline/fetch_data.py                   # all labs, both activities
+python pipeline/fetch_data.py --labs carter     # or a subset
+```
+
+The raw AddBiomechanics `.b3d` inputs (194 GB) are not re-hosted; `MANIFEST_b3d.csv` in the dataset
+repo lists every file with its SHA-256 so the identical inputs can be fetched from AddBiomechanics and
+re-processed with `pipeline/`.
+
 ## Label generation
 
 ```bash
@@ -89,8 +106,11 @@ python train_cnn.py ...                                                        #
 python train_mlp.py --activity both --input-set qinst_pelvisrel_winpos_contact_w20   # GRF-free MLP + contact flags
 ```
 
-Checkpoints are written to `jcf/full_duration/training/static/best_model_*.pt` (the `_both_` runs land in
-`static/`). Evaluate with `test_cnn.py` / `test_mlp.py`.
+Training writes checkpoints to `models/runs/mlp/` (MLP) and `models/runs/bicnn/` (BiCNN). Curated, documented
+models live in `models/<name>/` with a `MODEL_CARD.md` — see `models/README.md`.
+
+Checkpoints are **not stored in this repo** (`*.pt` is git-ignored). They are hosted on Hugging Face at
+`gellert5225/jcf-knee-surrogates` (revision `v1-isrr2026`); see `models/README.md` for a download snippet. Evaluate with `test_cnn.py` / `test_mlp.py`.
 
 ## Inference
 

@@ -23,7 +23,7 @@ Usage — static posture (one query):
     from inference_posture_surrogate import JCFPostureSurrogate
 
     predictor = JCFPostureSurrogate(
-        "best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt"
+        "models/mlp-grffree-contact/mlp-grffree-contact.pt"
     )
     out = predictor.predict_static(
         joint_angles=q,             # (16,) in JOINT_ORDER, radians

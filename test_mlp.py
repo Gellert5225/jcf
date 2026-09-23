@@ -22,6 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
+from train_mlp import CKPT_ROOT
 from train_mlp import JCF_MLP, FrameDataset, DATA_ROOTS
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,7 +43,7 @@ def parse_args():
     p.add_argument("--max-peak", type=float, default=6.0)
     p.add_argument("--checkpoint", type=str, default=None,
                    help="Override checkpoint path. Default looks at "
-                        "DATA_ROOTS[activity]/best_model_mlp_<activity>.pt")
+                        "models/runs/mlp/best_model_mlp_<activity>.pt")
     return p.parse_args()
 
 
@@ -56,7 +57,7 @@ def main():
         # 'both' is saved into the static root by convention (first key in DATA_ROOTS)
         root_for_ckpt = DATA_ROOTS["static"] if args.activity in ("static", "both") \
             else DATA_ROOTS["walking"]
-        ckpt_path = os.path.join(root_for_ckpt, f"best_model_mlp_{args.activity}.pt")
+        ckpt_path = os.path.join(CKPT_ROOT, f"best_model_mlp_{args.activity}.pt")
     if not os.path.exists(ckpt_path):
         print(f"Checkpoint not found: {ckpt_path}")
         print("Run train_mlp.py first.")
