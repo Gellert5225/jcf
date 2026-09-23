@@ -73,7 +73,7 @@ def main():
     del _ckpt_peek
 
     # Contact flags from the foot wrenches. The 6-dim wrench is
-    # [Mx, My, Mz, Fx, Fy, Fz] in the robot frame; vertical force is channel 2
+    # [Fx, Fy, Fz, Mx, My, Mz] in the robot frame (z up); vertical force is channel 2
     # (peaks ~760 N ≈ body weight). Contact = |Fz| above 5% BW.
     r_contact = l_contact = None
     if need_contact:

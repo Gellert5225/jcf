@@ -605,6 +605,8 @@ def _split_dirs(subject_dirs, train_size, seed):
 
 
 def train(activity='static', filter_flat=True, dataset=None, exclude=None,
+          init_from=None, extra_dirs=None, extra_weight=1.0, extra_val_dirs=None,
+          lr=None, tag=None,
           max_peak_bw=6.0, seed=SEED, input_set='full', dq_method='central',
           epochs=None, lr_patience=None, fmedial_weight=0.0, activation='relu',
           dropout=None):
@@ -650,6 +652,14 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         print(f"[{act}] train: {ns_train} subjects ({len(td)} trials), "
               f"val: {ns_val} subjects ({len(vd)} trials)")
 
+    # Fine-tuning: external labelled trials (e.g. jcf/external/<traj>_seg1, made by
+    # pipeline/label_trajectory_csv.py) join training as their own sampling bucket,
+    # bypassing the flat filter and the subject split.
+    if extra_dirs:
+        extra_dirs = [d.rstrip("/") for d in extra_dirs if os.path.isdir(d)]
+        train_dirs_by["external"] = extra_dirs
+        print(f"[external] {len(extra_dirs)} extra trial dirs (bucket weight {extra_weight:g})")
+
     if not train_dirs_by:
         print("No training data found.")
         return
@@ -662,12 +672,14 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         train_ds_per[act] = ds
         print(f"  [{act}] {len(ds):,} training frames")
 
-    # Combine if both
-    if activity == 'both':
+    # Combine if more than one bucket (both activities and/or external trials).
+    # Each main bucket has total sampling weight 1; the external bucket has extra_weight.
+    if len(train_ds_per) > 1:
         all_in = np.concatenate([d.frames_in for d in train_ds_per.values()], axis=0)
         all_out = np.concatenate([d.frames_out for d in train_ds_per.values()], axis=0)
         sample_weights = np.concatenate([
-            np.full(len(d), 1.0 / max(len(d), 1)) for d in train_ds_per.values()
+            np.full(len(d), (extra_weight if act == "external" else 1.0) / max(len(d), 1))
+            for act, d in train_ds_per.items()
         ])
         train_ds = FrameDataset.__new__(FrameDataset)
         train_ds.frames_in = all_in
@@ -680,9 +692,23 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         print("No training frames. Check data.")
         return
 
-    # Compute and apply normalization (always from the combined train set)
-    inp_mean = torch.from_numpy(train_ds.frames_in.mean(axis=0))
-    inp_std = torch.from_numpy(train_ds.frames_in.std(axis=0)).clamp(min=1e-8)
+    # Compute and apply normalization (from the combined train set, or, when
+    # fine-tuning, reuse the checkpoint's so the feature space stays identical).
+    init_ckpt = None
+    if init_from:
+        init_ckpt = torch.load(init_from, map_location="cpu", weights_only=False)
+        if init_ckpt.get("input_set") != input_set:
+            raise ValueError(f"--init-from checkpoint has input_set={init_ckpt.get('input_set')!r}, "
+                             f"but --input-set is {input_set!r}")
+        if int(init_ckpt["n_features"]) != n_features:
+            raise ValueError(f"--init-from checkpoint has {init_ckpt['n_features']} features, expected {n_features}")
+        inp_mean = init_ckpt["input_mean"].float()
+        inp_std = init_ckpt["input_std"].float()
+        print(f"Fine-tuning from {init_from} (epoch {init_ckpt.get('epoch')}, val {init_ckpt.get('val_loss', float('nan')):.6f}); "
+              f"normalization taken from the checkpoint")
+    else:
+        inp_mean = torch.from_numpy(train_ds.frames_in.mean(axis=0))
+        inp_std = torch.from_numpy(train_ds.frames_in.std(axis=0)).clamp(min=1e-8)
     print(f"\n  input_mean range: [{inp_mean.min():.2f}, {inp_mean.max():.2f}]")
     train_ds.frames_in = (train_ds.frames_in - inp_mean.numpy()) / inp_std.numpy()
 
@@ -698,6 +724,17 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
     val_ds = FrameDataset.__new__(FrameDataset)
     val_ds.frames_in = np.concatenate(val_pieces_in, axis=0)
     val_ds.frames_out = np.concatenate(val_pieces_out, axis=0)
+
+    ext_val_loader = None
+    if extra_val_dirs:
+        ext_val_dirs = [d.rstrip("/") for d in extra_val_dirs if os.path.isdir(d)]
+        ext_ds = FrameDataset(ext_val_dirs, max_peak_bw=max_peak_bw,
+                              input_set=input_set, dq_method=dq_method)
+        ext_ds.frames_in = (ext_ds.frames_in - inp_mean.numpy()) / inp_std.numpy()
+        print(f"  [external-val] {len(ext_ds):,} frames from {len(ext_val_dirs)} dirs "
+              f"(reported each epoch; checkpoint selection still uses the main val loss)")
+        ext_val_loader = DataLoader(ext_ds, batch_size=BATCH_SIZE, shuffle=False,
+                                    num_workers=0, pin_memory=True)
 
     if sample_weights is not None:
         sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights),
@@ -716,10 +753,16 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                     activation=activation).to(DEVICE)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: JCF_MLP {n_params:,} params (hidden={HIDDEN}, dropout={effective_dropout}, activation={activation})")
+    if init_ckpt is not None:
+        if init_ckpt.get("activation", "relu") != activation:
+            raise ValueError(f"--init-from checkpoint uses activation={init_ckpt.get('activation')!r}; pass --activation to match")
+        model.load_state_dict(init_ckpt["model_state_dict"])
+        print("  weights loaded from --init-from")
 
     n_epochs = epochs if epochs is not None else EPOCHS
     sched_patience = lr_patience if lr_patience is not None else 3
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE,
+    effective_lr = LEARNING_RATE if lr is None else lr
+    optimizer = torch.optim.Adam(model.parameters(), lr=effective_lr,
                                  weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=sched_patience, factor=0.5)
@@ -791,9 +834,18 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         val_loss /= n_val
         scheduler.step(val_loss)
 
-        lr = optimizer.param_groups[0]["lr"]
+        ext_msg = ""
+        if ext_val_loader is not None:
+            e_loss, n_e = 0.0, 0
+            with torch.no_grad():
+                for inp, lbl in ext_val_loader:
+                    inp = inp.to(DEVICE); lbl = lbl.to(DEVICE)
+                    e_loss += loss_fn(model(inp), lbl, inp).item() * len(inp); n_e += len(inp)
+            ext_msg = f" | ext-val: {e_loss / max(n_e, 1):.6f}"
+
+        cur_lr = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch+1:3d}/{n_epochs} | train: {train_loss:.6f} | "
-              f"val: {val_loss:.6f} | lr: {lr:.1e}")
+              f"val: {val_loss:.6f}{ext_msg} | lr: {cur_lr:.1e}")
 
         if val_loss < best_val:
             best_val = val_loss
@@ -807,6 +859,8 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 suffix += f"_fmW{w}"
             if activation != 'relu':
                 suffix += f"_{activation}"
+            if tag:
+                suffix += f"_{tag}"
             ckpt_name = f"best_model_mlp_{activity}{suffix}.pt"
             torch.save({
                 "epoch": epoch,
@@ -827,14 +881,16 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 "base_indices": INPUT_SETS[input_set]["base_indices"],
                 "include_height": INPUT_SETS[input_set]["include_height"],
                 "include_bmi": INPUT_SETS[input_set]["include_bmi"],
+                "init_from": init_from,
+                "extra_dirs": extra_dirs,
+                "extra_weight": extra_weight,
+                "tag": tag,
+                "lr": effective_lr,
             }, os.path.join(output_root, ckpt_name))
             print(f"  → saved (val={val_loss:.6f}) → {output_root}/{ckpt_name}")
 
-    suffix = "" if input_set == "full" else f"_{input_set}"
-    if dq_method != "central":
-        suffix += f"_{dq_method}"
     print(f"\nBest val loss: {best_val:.6f}")
-    print(f"Saved to {output_root}/best_model_mlp_{activity}{suffix}.pt")
+    print(f"Saved to {output_root}/{ckpt_name if best_val < float('inf') else '(nothing saved)'}")
 
 
 if __name__ == "__main__":
@@ -894,6 +950,20 @@ if __name__ == "__main__":
                    help=f"Override hidden-layer dropout (default {DROPOUT}). "
                         f"Raise (e.g. 0.4-0.5) when overfitting — useful for "
                         f"SiLU runs which fit train more aggressively than ReLU.")
+    p.add_argument("--init-from", type=str, default=None,
+                   help="Fine-tune: start from this checkpoint (weights + input normalization).")
+    p.add_argument("--extra-dirs", type=str, nargs="+", default=None,
+                   help="Extra labelled trial dirs (e.g. jcf/external/*_seg1) added to training "
+                        "as their own sampling bucket; not subject-split, not flat-filtered.")
+    p.add_argument("--extra-weight", type=float, default=1.0,
+                   help="Sampling weight of the external bucket relative to each main bucket "
+                        "(each main bucket = 1). 1.0 with --activity both ⇒ 1/3 of samples.")
+    p.add_argument("--extra-val-dirs", type=str, nargs="+", default=None,
+                   help="Extra labelled trial dirs reported as a separate 'ext-val' loss each epoch.")
+    p.add_argument("--lr", type=float, default=None,
+                   help=f"Learning rate (default {LEARNING_RATE}); use ~1e-4 when fine-tuning.")
+    p.add_argument("--tag", type=str, default=None,
+                   help="Suffix appended to the checkpoint name (e.g. ft_sep23) so the base run is not overwritten.")
     args = p.parse_args()
     train(activity=args.activity,
           filter_flat=not args.no_flat_filter,
@@ -903,4 +973,7 @@ if __name__ == "__main__":
           epochs=args.epochs, lr_patience=args.lr_patience,
           fmedial_weight=args.fmedial_weight,
           activation=args.activation,
-          dropout=args.dropout)
+          dropout=args.dropout,
+          init_from=args.init_from, extra_dirs=args.extra_dirs,
+          extra_weight=args.extra_weight, extra_val_dirs=args.extra_val_dirs,
+          lr=args.lr, tag=args.tag)

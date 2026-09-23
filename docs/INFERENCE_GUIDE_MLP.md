@@ -38,10 +38,7 @@ terms), so they are omitted.
 
 Evidence for the held-out numbers: `figures/heldout/contact_vs_baseline_heldout_summary.png` (aggregate), `figures/heldout/contact_vs_baseline_heldout_carterP019.png` (one subject), and the table twin `figures/heldout/contact_vs_baseline_heldout_summary.csv`.
 
-**Known issue (open):** on a synthetic optimizer trajectory, the contact checkpoint returned
-peak |F_medial| ≈ 0.67 BW where `mlp-grffree-base.pt` returned substantially higher values. Neither
-model has been validated against OpenSim ground truth on that kind of trajectory yet; until that
-comparison is done, treat the two as bracketing the answer rather than one being correct.
+**Known issue (diagnosed Sep 23, 2026):** on a synthetic optimizer trajectory whose knees stay locked (≈5° total knee range over the whole cycle, both legs, vs 15–60° in mocap; `figures/gt/trajectory_sep23_knee_kinematics.png`), OpenSim ground truth gives right-stance F_medial peaks of 1.8–2.3 BW while this model predicts ~0.5 BW and `mlp-grffree-base` is unreliable (1.86 in one stance, 0.44 in the other). GRF-free surrogates cannot see the load on a straight, upright stance leg; the training data has no such postures at load. On natural gait this model remains the most accurate. Two remedies are implemented in `docs/LABEL_AND_FINETUNE_GUIDE.md`: label optimizer trajectories with SO+JR directly (`pipeline/label_trajectory_csv.py`) and fine-tune this model on those labels (`train_mlp.py --init-from … --extra-dirs …`).
 
 ## What you need at runtime
 
