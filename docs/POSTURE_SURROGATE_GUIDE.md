@@ -1,3 +1,5 @@
+> **Superseded (Sep 2026):** see `INFERENCE_GUIDE_MLP.md` for the current GRF-free MLP (contact-flag variant). Kept for reference.
+
 # Posture-Optimizer Knee JCF Surrogate — Integration Guide
 
 A GRF-free MLP surrogate that predicts knee joint contact force (JCF) and the external knee adduction moment (KAM) from joint posture plus a short window of body-segment positions. Designed for use inside a posture optimizer where the optimizer picks one configuration at a time and queries the surrogate for a scalar load estimate. Trained jointly on quasi-static and walking trials from the AddBiomechanics database (Carter, Moore, Lencioni/Tiziana, Falisse).
@@ -184,7 +186,7 @@ Correlation (Pearson r) on walking F_y: 0.899 overall, 0.948 within-lab Carter, 
 
 **Wrong shape error.** `predict_static` expects positions as `(3,)` (single posture) or `(N, 3)` (batched). `predict_windowed` expects `(20, 3)` or `(N, 20, 3)`. Mismatched batch dims between `joint_angles` and the position arrays will error.
 
-**Predictor reports a different `input_set`.** You loaded the wrong checkpoint. This module only accepts `qinst_pelvisrel_winpos_w20`. For the GRF-based variant use `inference_static_simple.py`; for streaming walking control with COM velocity use the `qvcomrel_w20` checkpoint (separate helper not yet written).
+**Predictor reports a different `input_set`.** You loaded the wrong checkpoint. This module only accepts `qinst_pelvisrel_winpos_w20`. For the GRF-based variant use `legacy/inference_static_simple.py`; for streaming walking control with COM velocity use the `qvcomrel_w20` checkpoint (separate helper not yet written).
 
 ## Smoke test
 

@@ -12,6 +12,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))  # repo root, for train_* imports
 from train_cnn import JCF_CNN, load_subject
 
 # ─── Joint DOF names (37 total) ──────────────────────────────────────────────

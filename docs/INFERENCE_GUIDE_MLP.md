@@ -17,11 +17,24 @@ Dependencies: `numpy`, `torch`. The same module also loads the two older checkpo
 
 ## Which checkpoint
 
-| Checkpoint | Input | Held-out val loss | Notes |
-|---|---|---|---|
-| `…_contact_w20_fmW0p5.pt` | 238 ch: + windowed R/L contact flags | **0.104** | Recovers ~80 % of the late-stance (push-off) medial spike vs ~45 % for the baseline. Use this. |
-| `…_winpos_w20_fmW0p5.pt` | 198 ch | 0.164 | Baseline; no stance information |
-| `…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | 0.112 | Not recommended (see *Pelvis centering*) |
+Held-out numbers are on 323 walking trials from 18 subjects never seen in training (1,315
+late-stance → double-support entries). "Spike recovered" = mean predicted / mean ground-truth
+|F_medial| at those entries. Validation losses are not comparable across rows (different loss
+terms), so they are omitted.
+
+| Checkpoint | Input | Held-out F_medial MAE | Spike recovered | Notes |
+|---|---|---|---|---|
+| `…_contact_w20_fmW0p5.pt` | 238 ch: + windowed R/L contact flags | **0.195 BW** | **91 %** | Most accurate on real gait; better than `…_winpos_w20.pt` on 264 of 323 trials, M_x error −31 %. See *Known issue* below. |
+| `…_winpos_w20.pt` | 198 ch, plain MSE | 0.268 BW | 81 % | The model used for the paper's optimization results. No stance information. |
+| `…_winpos_w20_fmW0p5.pt` | 198 ch | 0.311 BW | 61 % | The file on disk is a 2-epoch checkpoint — do not use. |
+| `…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | — | — | Not recommended (see *Pelvis centering*). |
+
+Evidence for the held-out numbers: `figures/heldout/contact_vs_baseline_heldout_summary.png` (aggregate), `figures/heldout/contact_vs_baseline_heldout_carterP019.png` (one subject), and the table twin `figures/heldout/contact_vs_baseline_heldout_summary.csv`.
+
+**Known issue (open):** on a synthetic optimizer trajectory, the contact checkpoint returned
+peak |F_medial| ≈ 0.67 BW where `…_winpos_w20.pt` returned substantially higher values. Neither
+model has been validated against OpenSim ground truth on that kind of trajectory yet; until that
+comparison is done, treat the two as bracketing the answer rather than one being correct.
 
 ## What you need at runtime
 

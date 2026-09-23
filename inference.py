@@ -33,7 +33,7 @@ Static posture inference:
     receptive field) and read out the prediction at the middle frame.
     See predict_static() helper below.
 
-See INFERENCE_GUIDE.md for full documentation.
+See docs/INFERENCE_GUIDE.md for full documentation.
 """
 
 import numpy as np

@@ -14,7 +14,7 @@ higher for running).
 
 Usage:
     conda activate jcf
-    python scale_muscle_test.py
+    python pipeline/scale_muscle_test.py
 """
 
 import opensim as osm

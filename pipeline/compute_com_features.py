@@ -12,10 +12,10 @@ Caches results as <trial_dir>/com_features.npz so subsequent training/test
 runs read pre-computed features instead of invoking OpenSim per frame.
 
 Usage:
-    conda run -n jcf python compute_com_features.py
-    conda run -n jcf python compute_com_features.py --limit 200      # quick test on first 200 trials
-    conda run -n jcf python compute_com_features.py --workers 8      # parallel
-    conda run -n jcf python compute_com_features.py --overwrite      # recompute even if cached
+    conda run -n jcf python pipeline/compute_com_features.py
+    conda run -n jcf python pipeline/compute_com_features.py --limit 200      # quick test on first 200 trials
+    conda run -n jcf python pipeline/compute_com_features.py --workers 8      # parallel
+    conda run -n jcf python pipeline/compute_com_features.py --overwrite      # recompute even if cached
 """
 import os
 import sys

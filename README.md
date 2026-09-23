@@ -1,12 +1,33 @@
-# Knee Joint Contact Force (JCF) Surrogate Model
+# Knee Joint Contact Force (JCF) Surrogate Models
 
-Neural network surrogate model for predicting knee joint contact forces from ground reaction forces, trained on musculoskeletal simulation data from [AddBiomechanics](https://addbiomechanics.org/).
+Neural-network surrogates for the right-knee joint contact force (Fx, Fy, Fz) and knee adduction
+moment (Mx), trained on OpenSim Static Optimization + Joint Reaction labels computed from
+[AddBiomechanics](https://addbiomechanics.org/) data. They drive the pain-risk constraint in
+the antalgic gait synthesis work (Chong et al., ISRR 2026).
 
-## Overview
+**Pipeline**: `.b3d` → OpenSim IK/GRF → Static Optimization → Joint Reaction → labels → surrogate training
 
-This project builds a lightweight MLP that maps 6-channel GRF inputs (per-foot force vectors) to 3-axis knee JCF outputs (Fx, Fy, Fz in the tibial frame), enabling real-time JCF estimation for operational space control applications.
+## Repository layout
 
-**Pipeline**: `.b3d` → OpenSim IK/GRF → Static Optimization → Joint Reaction → Training labels
+All scripts are run from the repository root (data paths are relative to `./jcf/...`).
+
+| Path | Contents |
+|---|---|
+| `train_cnn.py`, `test_cnn.py` | Streaming BiCNN (consumes GRF): training and evaluation. Also hosts `load_subject`, used by the MLP pipeline. |
+| `train_mlp.py`, `test_mlp.py` | GRF-free per-frame MLP variants, selected with `--input-set` (incl. the contact-flag variant `qinst_pelvisrel_winpos_contact_w20`). |
+| `inference.py` | BiCNN inference module (`JCFPredictor`) — `docs/INFERENCE_GUIDE.md` |
+| `inference_posture_surrogate.py` | GRF-free MLP inference (`JCFPostureSurrogate`) — `docs/INFERENCE_GUIDE_MLP.md` |
+| `infer_trajectory_csv.py` | Runs an exported trajectory CSV through the MLP (frame rotation, q reorder, contact flags, windowing) |
+| `test_inference.py` | Parity check of `inference.py` against the `test_cnn.py` pipeline |
+| `pipeline/` | Label generation: `.b3d` → OpenSim → SO+JR (`batch_process.py`, `batch_process_parallel.py`, `b3d_to_opensim.py`, `process_jcf.py`, `compute_com_features.py`, `extract_root_features.py`, `validate_training_data.py`, …) |
+| `analysis/` | Diagnostics and plots (`feature_importance.py`, `grad_analysis.py`, `plot_jcf.py`, `plot_f_medial_overlay.py`) |
+| `legacy/` | Superseded inference modules |
+| `docs/` | Integration guides and project notes |
+| `figures/` | Generated figures: `heldout/` (surrogate evaluation), `gt/` (ground-truth analyses), `legacy/` — git-ignored |
+| `assets/` | `Rajagopal2015.urdf` |
+| `jcf/` | Processed trials and checkpoints (`jcf/full_duration/training/{static,walking}/`) — git-ignored |
+| `with_arm/` | Raw AddBiomechanics `.b3d` data — git-ignored |
+| `paper/` | ISRR manuscript (LaTeX) — git-ignored |
 
 ## Setup
 
@@ -52,57 +73,29 @@ jcf/
 └── testing/            # same structure
 ```
 
-## Pipeline
-
-### 1. Batch Processing (`batch_process.py`)
-
-Scans `.b3d` files for valid walking windows, converts to OpenSim format, and runs Static Optimization + Joint Reaction:
+## Label generation
 
 ```bash
-conda run -n jcf python batch_process.py
+conda run -n jcf python pipeline/batch_process_parallel.py            # .b3d → OpenSim → SO+JR, parallel
+conda run -n jcf python pipeline/compute_com_features.py              # COM / foot position features for the MLP
 ```
 
-Key parameters:
-- **Window duration**: 2.0s (falls back to shorter windows for single-step trials)
-- **GRF cap**: ≤1.7 BW per foot
-- **Heel strike detection**: 2% BW off-threshold, 10% BW on-threshold
-- **Reserve actuators**: 1 Nm rotational, 10 N translational
+Key parameters live at the top of `pipeline/batch_process.py` (`B3D_ROOT`, `OUTPUT_ROOT`, `DATASETS_TO_PROCESS`).
 
-Configure `B3D_ROOT`, `OUTPUT_ROOT`, and `DATASETS_TO_PROCESS` at the top of the file.
-
-### 2. Training (`train_jcf.py`)
-
-Trains an MLP surrogate: 6 GRF inputs (normalized by BW) → 3 JCF outputs (Fx, Fy, Fz in BW):
+## Training
 
 ```bash
-conda run -n jcf python train_jcf.py
+python train_cnn.py ...                                                        # BiCNN (with GRF)
+python train_mlp.py --activity both --input-set qinst_pelvisrel_winpos_contact_w20   # GRF-free MLP + contact flags
 ```
 
-- **Architecture**: MLP [64, 64, 32] → 3 outputs
-- **Input**: `calcn_r` and `calcn_l` force vectors (vx, vy, vz), z-score normalized
-- **Output**: Fx (shear), Fy (compressive), Fz (shear) on `walker_knee_r` in tibial child frame
-- **Outlier filter**: Subjects with peak resultant > 10 BW are excluded
-- Saves `jcf_model.pt` and `jcf_norm_params.npz`
+Checkpoints are written to `jcf/full_duration/training/static/best_model_*.pt` (the `_both_` runs land in
+`static/`). Evaluate with `test_cnn.py` / `test_mlp.py`.
 
-### 3. Testing (`test_jcf.py`)
+## Inference
 
-Evaluates the trained model on held-out test subjects:
-
-```bash
-conda run -n jcf python test_jcf.py
-```
-
-Produces per-subject time-series plots and RMSE/R² metrics.
-
-## Supporting Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `b3d_to_opensim.py` | Converts `.b3d` trial slices to OpenSim files |
-| `inspect_b3d.py` | Inspects `.b3d` file metadata and trial structure |
-| `extract_jcf.py` | Extracts JCF data from `.sto` result files |
-| `plot_jcf.py` | Plots JCF time series |
-| `check_knee_moment.py` | Diagnostic for knee moment analysis |
+- BiCNN: `docs/INFERENCE_GUIDE.md`
+- GRF-free MLP (posture / gait optimizer): `docs/INFERENCE_GUIDE_MLP.md`
 
 ## Technical Notes
 

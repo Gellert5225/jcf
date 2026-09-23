@@ -8,7 +8,7 @@ Checks each subject's OpenSim SO + JR output for:
 3. JCF magnitude sanity – peak resultant knee JCF outside physiological range
 
 Usage:
-    conda run -n jcf python validate_training_data.py [--activity running|walking|both]
+    conda run -n jcf python pipeline/validate_training_data.py [--activity running|walking|both]
                                                        [--threshold-activations 0.10]
                                                        [--threshold-reserve 5.0]
                                                        [--jcf-range 0.5 8.0]

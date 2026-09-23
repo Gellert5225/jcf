@@ -1,4 +1,6 @@
 import os, torch, numpy as np
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))  # repo root, for train_* imports
 from train_cnn import load_subject, JCF_CNN_v2
 
 MODEL_PATH = "./jcf/full_duration/training/running/best_model_i.pt"

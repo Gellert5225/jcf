@@ -239,7 +239,7 @@ if __name__ == "__main__":
     """Verify the module loads and runs on a synthetic posture."""
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python inference_static_simple.py <path_to_checkpoint.pt>")
+        print("Usage: python legacy/inference_static_simple.py <path_to_checkpoint.pt>")
         sys.exit(1)
 
     predictor = JCFStaticPredictor(sys.argv[1])

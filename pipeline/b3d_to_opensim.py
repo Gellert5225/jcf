@@ -18,8 +18,8 @@ Install (in WSL):
     pip3 install nimblephysics numpy
 
 Usage:
-    python b3d_to_opensim.py /path/to/b3d_files/ --output ./opensim_data/
-    python b3d_to_opensim.py /path/to/single_file.b3d --output ./opensim_data/
+    python pipeline/b3d_to_opensim.py /path/to/b3d_files/ --output ./opensim_data/
+    python pipeline/b3d_to_opensim.py /path/to/single_file.b3d --output ./opensim_data/
 """
 
 import nimblephysics as nimble

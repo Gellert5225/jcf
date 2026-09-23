@@ -14,8 +14,8 @@ For each processed subject, reads the source .b3d and extracts:
 Saves as root_features.npy alongside existing data.
 
 Usage:
-    conda run -n jcf python extract_root_features.py
-    conda run -n jcf python extract_root_features.py --testing
+    conda run -n jcf python pipeline/extract_root_features.py
+    conda run -n jcf python pipeline/extract_root_features.py --testing
 """
 
 import os

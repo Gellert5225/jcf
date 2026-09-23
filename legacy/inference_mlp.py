@@ -231,7 +231,7 @@ class JCFMLPPredictor:
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python inference_mlp.py <best_model_mlp.pt>")
+        print("Usage: python legacy/inference_mlp.py <best_model_mlp.pt>")
         sys.exit(1)
 
     p = JCFMLPPredictor(sys.argv[1])

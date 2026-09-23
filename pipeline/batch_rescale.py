@@ -9,9 +9,9 @@ the original jcf_output/ for comparison.
 
 Usage:
     conda activate jcf
-    python batch_rescale.py
-    python batch_rescale.py --scale 1.5   # alternative scale factor
-    python batch_rescale.py --root ./jcf/testing/running   # different root
+    python pipeline/batch_rescale.py
+    python pipeline/batch_rescale.py --scale 1.5   # alternative scale factor
+    python pipeline/batch_rescale.py --root ./jcf/testing/running   # different root
 """
 
 import opensim as osm

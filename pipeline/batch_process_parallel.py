@@ -12,9 +12,9 @@ Thread throttling: OMP/MKL/OPENBLAS set to 1 thread per process to avoid
 oversubscription when running N workers on N cores.
 
 Usage:
-    conda run -n jcf python batch_process_parallel.py              # auto-detect cores
-    conda run -n jcf python batch_process_parallel.py --workers 4  # 4 workers
-    conda run -n jcf python batch_process_parallel.py --split both # training + testing
+    conda run -n jcf python pipeline/batch_process_parallel.py              # auto-detect cores
+    conda run -n jcf python pipeline/batch_process_parallel.py --workers 4  # 4 workers
+    conda run -n jcf python pipeline/batch_process_parallel.py --split both # training + testing
 """
 
 # ── Thread throttling (MUST come before any other imports) ────────────────────

@@ -6,7 +6,7 @@ converts to OpenSim format, then runs Static Optimization + JointReaction
 to produce knee JCF labels for NN training.
 
 Usage:
-    conda run -n jcf python batch_process.py
+    conda run -n jcf python pipeline/batch_process.py
 
 Steps per subject:
     1. b3d_to_opensim: .b3d -> .osim, .mot, grf
@@ -444,7 +444,7 @@ def convert_b3d_slice(b3d_path, output_dir, trial, start_frame, num_frames,
                       output_name):
     """Run b3d_to_opensim.py on a specific trial/frame slice."""
     result = subprocess.run(
-        [sys.executable, "./b3d_to_opensim.py", b3d_path,
+        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "b3d_to_opensim.py"), b3d_path,
          "--output", output_dir,
          "--trial", str(trial),
          "--start-frame", str(start_frame),

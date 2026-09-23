@@ -12,7 +12,7 @@ whether the regression-to-mean attenuation we documented for the
 BiCNN also applies (and probably more strongly) to the GRF-free MLP.
 
 Usage:
-    conda run -n jcf python plot_f_medial_overlay.py \
+    conda run -n jcf python analysis/plot_f_medial_overlay.py \
         --trial ./jcf/full_duration/training/walking/carter_P003_split0_t04 \
         --ckpt ./jcf/full_duration/training/static/best_model_mlp_both_qinst_pelvisrel_winpos_w20.pt \
         --out /tmp/f_medial_overlay.png
@@ -26,6 +26,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))  # repo root, for train_* imports
 from train_mlp import INPUT_SETS, JCF_MLP, _build_com_features, _windowize_positions_only
 
 

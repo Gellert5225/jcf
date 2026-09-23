@@ -995,7 +995,7 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
 
     print(f"Found {len(subject_dirs)} subjects with JCF data")
     if len(subject_dirs) == 0:
-        print("No data! Run batch_process.py first.")
+        print("No data! Run pipeline/batch_process.py first.")
         return
 
     # Filter out flat (non-cyclic) waveforms

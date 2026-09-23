@@ -7,13 +7,13 @@ No time-window selection — you see every frame.
 
 Usage:
     # Single b3d file
-    conda run -n jcf python process_jcf.py path/to/subject.b3d
+    conda run -n jcf python pipeline/process_jcf.py path/to/subject.b3d
 
     # All b3d files under a folder (recursive)
-    conda run -n jcf python process_jcf.py --all with_arm/testing
+    conda run -n jcf python pipeline/process_jcf.py --all with_arm/testing
 
     # Custom output directory
-    conda run -n jcf python process_jcf.py path/to/subject.b3d --output ./my_output
+    conda run -n jcf python pipeline/process_jcf.py path/to/subject.b3d --output ./my_output
 """
 
 import opensim as osm
