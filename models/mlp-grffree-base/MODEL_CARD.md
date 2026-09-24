@@ -31,3 +31,5 @@ from inference_posture_surrogate import JCFPostureSurrogate
 m = JCFPostureSurrogate("models/mlp-grffree-base/mlp-grffree-base.pt")
 ```
 Full integration guide: `docs/INFERENCE_GUIDE_MLP.md (API identical; omit the contact arguments)`.
+
+**Pelvis-centering artefact (Sep 23, 2026):** on overground trajectories centered on their own mean, this model's output drifts with walking distance (training is ~90 % treadmill, centered pelvis range ≤ 0.1 m). On the ISRR reference motion the 1.86 BW peak at 4.2 s and the −0.6 BW start are that artefact; with `pelvis_tx/ty/tz` zeroed the model reads 0.5–0.8 BW throughout. Remove the pelvis drift at inference — stride-scale running mean, or zero it (`docs/INFERENCE_GUIDE_MLP.md`, *Pelvis centering*); zeroing costs ~10 % on real gait, the running mean ~1 %. Evidence: `figures/gt/trajectory_sep23_pelvis_centering_effect.png`.

@@ -31,3 +31,5 @@ from inference_posture_surrogate import JCFPostureSurrogate
 m = JCFPostureSurrogate("models/mlp-grffree-contact/mlp-grffree-contact.pt")   # see docs/INFERENCE_GUIDE_MLP.md
 ```
 Full integration guide: `docs/INFERENCE_GUIDE_MLP.md`.
+
+**Pelvis-centering (Sep 23, 2026):** remove the `pelvis_tx/ty/tz` drift at inference for overground trajectories (running mean ≈1 s, or zero; see `docs/INFERENCE_GUIDE_MLP.md`, *Pelvis centering*). On the Sep 23 trajectory this changes this model from 0.33/0.40 BW to 0.57/0.52 BW in the two right stances (ground truth 1.76/1.17); the plain-MSE contact run (`runs/mlp/…contact_w20.pt`) goes to 0.93/0.91 with correlation 0.88 to ground truth. The locked-knee under-prediction remains in all cases.

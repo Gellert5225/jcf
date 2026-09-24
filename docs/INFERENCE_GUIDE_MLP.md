@@ -18,14 +18,20 @@ Get the checkpoint from Hugging Face (private during review — `hf auth login` 
 ```python
 from huggingface_hub import hf_hub_download
 ckpt = hf_hub_download("gellert5225/jcf-knee-surrogates", "mlp-grffree-contact/mlp-grffree-contact.pt", revision="v1-isrr2026")
-``` The same module also loads the two older checkpoints
-(`mlp-grffree-base.pt` and the archived runs under `models/runs/mlp/`) and adapts automatically from the
-`input_set` tag stored in the file.
+```
+Runs that are not part of the tagged release live under `runs/mlp/` on `main` (no `revision`):
+
+```python
+ckpt = hf_hub_download("gellert5225/jcf-knee-surrogates",
+                       "runs/mlp/best_model_mlp_both_qinst_pelvisrel_winpos_contact_w20_e90_2.pt")
+```
+The same module loads every checkpoint in the repo and adapts automatically from the `input_set` tag stored in
+the file; a contact-flag checkpoint requires the two `*_contact_window` arguments, a 198-channel one rejects them.
 
 ## Which checkpoint
 
 Held-out numbers are on 323 walking trials from 18 subjects never seen in training (1,315
-late-stance → double-support entries). "Spike recovered" = mean predicted / mean ground-truth
+late-stance → double-support entries; static numbers on 119 quasi-static trials). "Spike recovered" = mean predicted / mean ground-truth
 |F_medial| at those entries. Validation losses are not comparable across rows (different loss
 terms), so they are omitted.
 
@@ -33,12 +39,15 @@ terms), so they are omitted.
 |---|---|---|---|---|
 | `mlp-grffree-contact.pt` | 238 ch: + windowed R/L contact flags | **0.195 BW** | **91 %** | Most accurate on real gait; better than `mlp-grffree-base.pt` on 264 of 323 trials, M_x error −31 %. See *Known issue* below. |
 | `mlp-grffree-base.pt` | 198 ch, plain MSE | 0.268 BW | 81 % | The model used for the paper's optimization results. No stance information. |
+| `runs/mlp/…_contact_w20.pt` (contact-MSE) | 238 ch, plain MSE, all 6 labs | 0.252 BW | 80 % | Same inputs as `mlp-grffree-contact.pt`, no F_medial loss term. Static held-out 0.286 BW. On the Sep 23 locked-knee motion with pelvis drift removed: 0.93 / 0.91 BW in the two right stances (truth 1.76 / 1.17), never crosses 1.4 BW. |
+| `runs/mlp/…_both_…_contact_w20_e90_2.pt` | 238 ch, plain MSE, `--exclude han fregly` (paper's 4-lab pool) | not yet run | — | Sep 23 evening. On the locked-knee motion with drift removed: 1.37 / 1.38 BW, crosses 1.4 BW in both stances, MAE 0.46 — the closest of any checkpoint there, overshooting peaks 15–30 %. Unvalidated on held-out gait; treat as experimental. |
+| `runs/mlp/…_walking_…_contact_w20_e90_2.pt` | 238 ch, plain MSE, **walking trials only** | 0.277 BW | 88 % | Static held-out 0.422 BW (never saw static — do not use for quasi-static queries). On the locked-knee motion with drift removed: 1.63 / 1.61 BW, crosses in both stances, MAE 0.64, peaks 30–70 % high. Specialist for gait windows. |
 | `runs/mlp/incomplete/…_w20_fmW0p5.pt` | 198 ch | 0.311 BW | 61 % | The file on disk is a 2-epoch checkpoint — do not use. |
 | `runs/mlp/…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | — | — | Not recommended (see *Pelvis centering*). |
 
 Evidence for the held-out numbers: `figures/heldout/contact_vs_baseline_heldout_summary.png` (aggregate), `figures/heldout/contact_vs_baseline_heldout_carterP019.png` (one subject), and the table twin `figures/heldout/contact_vs_baseline_heldout_summary.csv`.
 
-**Known issue (diagnosed Sep 23, 2026):** on a synthetic optimizer trajectory whose knees stay locked (≈5° total knee range over the whole cycle, both legs, vs 15–60° in mocap; `figures/gt/trajectory_sep23_knee_kinematics.png`), OpenSim ground truth gives right-stance F_medial peaks of 1.8–2.3 BW while this model predicts ~0.5 BW and `mlp-grffree-base` is unreliable (1.86 in one stance, 0.44 in the other). GRF-free surrogates cannot see the load on a straight, upright stance leg; the training data has no such postures at load. On natural gait this model remains the most accurate. Two remedies are implemented in `docs/LABEL_AND_FINETUNE_GUIDE.md`: label optimizer trajectories with SO+JR directly (`pipeline/label_trajectory_csv.py`) and fine-tune this model on those labels (`train_mlp.py --init-from … --extra-dirs …`).
+**Known issue (diagnosed Sep 23, 2026):** two separate effects were found on a synthetic optimizer trajectory. First, trajectory-mean pelvis centering on overground motion drives all checkpoints out of distribution (see *Pelvis centering* below; removing the pelvis drift (running mean or zeroing) removes the base model's spurious peak and lifts the contact-MSE run's correlation with ground truth from 0.0 to 0.88). Second, on that trajectory the knees stay locked (≈5° total knee range over the whole cycle, both legs, vs 15–60° in mocap; `figures/gt/trajectory_sep23_knee_kinematics.png`), OpenSim ground truth gives right-stance F_medial peaks of 1.8–2.3 BW while this model predicts ~0.5 BW and `mlp-grffree-base` is unreliable (1.86 in one stance, 0.44 in the other). GRF-free surrogates cannot see the load on a straight, upright stance leg; the training data has no such postures at load. On natural gait this model remains the most accurate. Two remedies are implemented in `docs/LABEL_AND_FINETUNE_GUIDE.md`: label optimizer trajectories with SO+JR directly (`pipeline/label_trajectory_csv.py`) and fine-tune this model on those labels (`train_mlp.py --init-from … --extra-dirs …`).
 
 ## What you need at runtime
 
@@ -145,27 +154,45 @@ out = m.predict_windowed(..., alpha=0.6, d_m=0.045)
 `fy` and `mx` are returned separately, so a φ sensitivity sweep is pure post-processing —
 no re-inference needed.
 
-## Pelvis centering (read this if you use gradients)
+## Pelvis centering (read this before running any overground trajectory)
 
-The model never sees absolute lab position: at training time `pelvis_tx/ty/tz` were
-zero-centered **per trial**. `predict_windowed` reproduces this by subtracting the **batch mean**
-of `q[:, 3:6]` inside the call.
+The model never sees absolute lab position: at training time `pelvis_tx/ty/tz` were zero-centered
+**per trial**, and `predict_windowed` reproduces this by subtracting the **batch mean** of `q[:, 3:6]`.
+About 90 % of the training frames are treadmill trials (Carter, Moore, Han), where the centered pelvis
+translation stays within ±0.1 m. An overground trajectory centered on its own mean feeds the model
+pelvis positions of ±0.9 m, which it has never seen, and the output drifts with the walking distance.
+On the Sep 23 optimizer trajectory this drift alone moved the base model's F_medial by ~1 BW across the
+trajectory and produced a spurious 1.86 BW peak in one stance
+(`figures/gt/trajectory_sep23_pelvis_centering_effect.png`, attribution: `pelvis_tx` +0.74 BW, `pelvis_ty` +0.50 BW).
 
-- A single-frame call therefore sees `tx = ty = tz = 0`. That is fine for prediction (the model
-  saw every trial-relative offset in training) but discards a weak signal.
-- Inside an optimizer the batch-mean creates a dense Jacobian (`∂q_in[i]/∂q[j] = δ_ij − 1/N`).
-  For a block-diagonal Jacobian, **freeze the constant**: compute the mean once on your initial
-  trajectory, subtract it yourself, and pass `skip_pelvis_centering=True`. This is bit-identical
-  to the internal centering when the constant equals the batch mean.
+**Rule: remove the walking-distance drift from the pelvis translation, keep the within-stride oscillation.**
+Subtract a stride-scale running mean (about 1 s, centred) from `pelvis_tx/ty/tz` along the trajectory and pass
+`skip_pelvis_centering=True`:
 
 ```python
-pelvis_const = q_traj[:, 3:6].mean(axis=0)          # once
-q_in = q16.copy(); q_in[3:6] -= pelvis_const
-out = m.predict_windowed(q_in, ..., skip_pelvis_centering=True)
+from scipy.ndimage import uniform_filter1d
+q_traj[:, 3:6] -= uniform_filter1d(q_traj[:, 3:6], size=120, axis=0, mode="nearest")   # 120 frames = 1.2 s at 100 Hz
+out = m.predict_windowed(q_traj[k], ..., skip_pelvis_centering=True)
 ```
 
-Do **not** center per 20-frame window — the `…_winctr_…` checkpoint was trained that way and is
-measurably worse.
+Measured on the 323-trial walking held-out set and the 119-trial static set (F_medial MAE, BW):
+
+| treatment | base | contact-fmW0.5 | contact-MSE | static (all models) |
+|---|---|---|---|---|
+| per-trial centering (training-time, treadmill) | 0.268 | 0.195 | 0.252 | unchanged |
+| running mean 1.2 s | 0.270 | 0.213 | 0.258 | unchanged |
+| pelvis zeroed | 0.295 | 0.235 | 0.279 | +0.01 |
+
+- The running mean removes the ±0.9 m drift on the Sep 23 trajectory (fed range becomes 0.09 m, inside the
+  treadmill training range) and gives the same predictions there as zeroing, while costing 0–9 % on real gait
+  instead of 10–20 %. The within-stride pelvis oscillation is a real signal the models learned.
+- Zeroing (`q_in[3:6] = 0`) is the simplest fallback and gives a constant input (block-diagonal Jacobian). Inside an
+  optimizer, compute the running mean once from the *reference* trajectory and freeze it per knot to get the same
+  sparsity with the running-mean treatment.
+- Do **not** subtract a single trajectory mean for overground motion. Earlier versions of this guide recommended it;
+  it is what produces the artefact. For treadmill-like motion (pelvis range < 0.1 m) all treatments agree.
+- The `…_winctr_…` *checkpoint* is a different thing: a retrained model that validated worse. The advice above is about
+  the input treatment for the standard checkpoints, not about that file.
 
 ## Getting gradients (Ipopt / autodiff)
 
@@ -174,7 +201,7 @@ evaluation. For backpropagation build the feature tensor yourself and call the n
 Feature layout (238):
 
 ```
-[0:16]     q16                    (pelvis tx/ty/tz already centered as above)
+[0:16]     q16                    (pelvis tx/ty/tz drift-removed as above)
 [16:236]   window, frame-major: for f in 0..19:
                com_rel[f] (3), rfoot_rel[f] (3), lfoot_rel[f] (3), r_contact[f] (1), l_contact[f] (1)
 [236:238]  mass_kg, height_m
