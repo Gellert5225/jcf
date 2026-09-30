@@ -69,7 +69,7 @@ def main():
     _ckpt_peek = _torch.load(args.ckpt, map_location="cpu", weights_only=True)
     _input_set = str(_ckpt_peek.get("input_set", ""))
     need_window_pelvis_centering = _input_set.endswith("_winctr_w20")
-    need_contact = _input_set == "qinst_pelvisrel_winpos_contact_w20"
+    need_contact = "_contact_" in _input_set
     del _ckpt_peek
 
     # Contact flags from the foot wrenches. The 6-dim wrench is

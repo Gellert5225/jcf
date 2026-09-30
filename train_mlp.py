@@ -205,6 +205,28 @@ INPUT_SETS = {
         "n_features_total": 16 + 20 * 11 + 2,   # 238
         "desc": "qinst_pelvisrel_winpos_w20 + windowed binary R/L contact flags (single/dual stance) = 238 ch",
     },
+    # Same as qinst_pelvisrel_winpos_contact_w20 but WITHOUT pelvis_tx/ty/tz in q.
+    # The models were very sensitive to pelvis height relative to its local mean
+    # (~0.3–0.5 BW per cm), a gait-phase cue an optimizer can exploit; this variant
+    # removes the channel. Pelvis tilt/list/rotation and all COM/foot-relative-to-pelvis
+    # windows are kept, so posture information is unchanged.
+    "qinst_notrans_pelvisrel_winpos_contact_w20": {
+        "base_indices": None,
+        "include_height": True,
+        "include_bmi": False,
+        "uses_com": True,
+        "uses_pelvis_rel": True,
+        "replicate_q": False,
+        "window_only_positions": True,
+        "include_contact": True,
+        "drop_pelvis_translation": True,
+        "q_dim": 13,                            # q16 minus pelvis_tx/ty/tz
+        "window": 20,
+        "per_frame_ch": 26,                     # q(13) + pos(9) + contact(2) + mass,height(2)
+        "n_pos": 11,
+        "n_features_total": 13 + 20 * 11 + 2,   # 235
+        "desc": "qinst_pelvisrel_winpos_contact_w20 without pelvis_tx/ty/tz = 235 ch",
+    },
 }
 
 CONTACT_GRF_BW_THRESHOLD = 0.05   # vertical GRF (BW) above which a foot counts as in contact
@@ -396,6 +418,8 @@ def _build_com_features(subj_dir, cfg, max_peak_bw, min_length, predict_moment):
         parts.append(np.full((T, 1), mass, dtype=np.float32))
         parts.append(np.full((T, 1), height_m, dtype=np.float32))
 
+    if cfg.get("drop_pelvis_translation"):
+        parts[0] = np.delete(parts[0], [3, 4, 5], axis=1)   # q16 → q13 (no pelvis_tx/ty/tz)
     feat = np.hstack(parts).astype(np.float32)
     assert feat.shape[1] == cfg["per_frame_ch"], \
         f"Feature width {feat.shape[1]} != expected {cfg['per_frame_ch']}"
@@ -505,7 +529,8 @@ class FrameDataset(Dataset):
                     if cfg.get("window_only_positions", False):
                         pelvis_cols = (3, 4, 5) if cfg.get("pelvis_per_window_centering") else None
                         feat = _windowize_positions_only(
-                            feat, window, n_pos=cfg.get("n_pos", 9),
+                            feat, window, q_dim=cfg.get("q_dim", 16),
+                            n_pos=cfg.get("n_pos", 9),
                             pelvis_t_cols=pelvis_cols,
                         )
                     else:

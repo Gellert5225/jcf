@@ -112,6 +112,34 @@ N_FEATURES = N_JOINTS + WINDOW * N_POS_CH + 2            # 198
 N_FEATURES_CONTACT = N_JOINTS + WINDOW * N_POS_CH_CONTACT + 2   # 238
 
 
+
+def remove_pelvis_drift(pelvis_xyz, fs_hz=100.0, window_s=1.2, fit_s=0.5):
+    """Subtract a centred running mean from the pelvis translation along a trajectory.
+
+    Removes the walking-distance drift of an overground trajectory while keeping the
+    within-stride pelvis motion the models were trained on (treadmill data, per-trial
+    centred, range ≈ ±0.1 m). The path is extended at constant velocity (fitted over the
+    first/last `fit_s` seconds) by half a window at each end, so edge frames carry no
+    residual drift. Use the result as q[:, 3:6] with skip_pelvis_centering=True.
+
+    pelvis_xyz : (N, 3) pelvis_tx/ty/tz in the OpenSim frame, metres. Returns (N, 3).
+    """
+    x = np.asarray(pelvis_xyz, dtype=np.float64)
+    if x.ndim != 2 or x.shape[1] != 3:
+        raise ValueError(f"pelvis_xyz must be (N, 3); got {x.shape}")
+    N = len(x); L = max(2, int(round(window_s * fs_hz))); h = L // 2; k = max(2, min(N, int(round(fit_s * fs_hz))))
+    i = np.arange(k, dtype=np.float64)
+    s0 = np.polyfit(i, x[:k], 1)[0] if k >= 2 else np.zeros(3)
+    s1 = np.polyfit(i, x[-k:], 1)[0] if k >= 2 else np.zeros(3)
+    pre = x[0] + s0[None, :] * np.arange(-h, 0, dtype=np.float64)[:, None]
+    post = x[-1] + s1[None, :] * np.arange(1, h + 1, dtype=np.float64)[:, None]
+    ext = np.vstack([pre, x, post])
+    cs = np.cumsum(np.vstack([np.zeros((1, 3)), ext]), axis=0)
+    idx = np.arange(h, h + N)
+    lo = idx - h; hi = np.minimum(idx + h + 1, len(ext))
+    mean = (cs[hi] - cs[lo]) / (hi - lo)[:, None]
+    return x - mean
+
 class JCFPostureSurrogate:
     """
     Loads the (q_inst, windowed positions, mass, height) MLP surrogate.
@@ -131,6 +159,7 @@ class JCFPostureSurrogate:
         "qinst_pelvisrel_winpos_w20",          # per-trial centering
         "qinst_pelvisrel_winpos_winctr_w20",   # per 20-frame-window centering
         "qinst_pelvisrel_winpos_contact_w20",  # + windowed R/L contact flags
+        "qinst_notrans_pelvisrel_winpos_contact_w20",  # contact, without pelvis_tx/ty/tz (235 ch)
     )
 
     def __init__(self, checkpoint_path, device=None):
@@ -149,11 +178,17 @@ class JCFPostureSurrogate:
             )
         self.input_set = input_set
         self.pelvis_per_window_centering = input_set.endswith("_winctr_w20")
-        self.include_contact = input_set == "qinst_pelvisrel_winpos_contact_w20"
+        self.include_contact = "_contact_" in input_set
+        # notrans: pelvis_tx/ty/tz are not model inputs. The caller still passes all 16
+        # joint angles; the three translations are dropped here, so they have no effect
+        # on the output and receive no gradient.
+        self.drop_pelvis_translation = "_notrans_" in input_set
         self.n_pos_ch = N_POS_CH_CONTACT if self.include_contact else N_POS_CH
 
         self.n_features = ckpt["n_features"]
         expected_features = N_FEATURES_CONTACT if self.include_contact else N_FEATURES
+        if self.drop_pelvis_translation:
+            expected_features -= len(PELVIS_TX_COLS)
         if self.n_features != expected_features:
             raise ValueError(
                 f"Expected n_features={expected_features} for input_set "
@@ -263,6 +298,8 @@ class JCFPostureSurrogate:
         mass_col = np.full((N, 1), mass_kg, dtype=np.float64)
         height_col = np.full((N, 1), height_m, dtype=np.float64)
 
+        if self.drop_pelvis_translation:
+            ja = np.delete(ja, PELVIS_TX_COLS, axis=1)             # (N, 13)
         feat = np.hstack([ja, pos_flat, mass_col, height_col]).astype(np.float32)
         assert feat.shape[1] == self.n_features, \
             f"Feature width {feat.shape[1]} != expected {self.n_features}"

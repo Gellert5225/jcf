@@ -42,6 +42,8 @@ terms), so they are omitted.
 | `runs/mlp/…_contact_w20.pt` (contact-MSE) | 238 ch, plain MSE, all 6 labs | 0.252 BW | 80 % | Same inputs as `mlp-grffree-contact.pt`, no F_medial loss term. Static held-out 0.286 BW. On the Sep 23 locked-knee motion with pelvis drift removed: 0.93 / 0.91 BW in the two right stances (truth 1.76 / 1.17), never crosses 1.4 BW. |
 | `runs/mlp/…_both_…_contact_w20_e90_2.pt` | 238 ch, plain MSE, `--exclude han fregly` (paper's 4-lab pool) | 0.261 BW | 86 % | Static held-out 0.298 BW. On the locked-knee motion with drift removed: 1.37 / 1.38 BW, crosses 1.4 BW in both stances, MAE 0.46 — closest of any checkpoint there, but through a moment overshoot (peaks 15–30 % high). No gain on real gait over the base. Experimental. |
 | `runs/mlp/…_both_…_contact_w20_fmW0p5_e100_2.pt` | 238 ch, F_medial loss 0.5, `--exclude han fregly` | 0.225 BW | 92 % | Static held-out 0.229 BW. On the locked-knee motion: 0.58 / 0.61 BW with Mx ≈ 0, never crosses 1.4 BW — same behaviour as the curated fmW model, no advantage over it. |
+| `runs/mlp/…_walking_notrans_…_contact_w20_fmW0p5_e100_2.pt` | 235 ch: as the row below, **without pelvis_tx/ty/tz** | 0.232 BW | 77 % | Static 0.398 BW — gait windows only. Not exploitable through pelvis height (1.3 cm lift: 2.16 → 2.15 BW). On the locked-knee motion: peaks 2.42 / 2.16 (OpenSim 2.15 / 1.77), 44 % of frames over 1.4 BW. **Recommended inside the gait optimizer**; no pelvis centering needed. |
+| `runs/mlp/…_walking_…_contact_w20_fmW0p5_e100_2.pt` | 238 ch, F_medial loss 0.5, **walking only**, `--exclude han fregly` | 0.216 BW | 85 % | Static held-out 0.394 BW — **gait windows only**. On the locked-knee motion with drift removed: peaks 2.30 / 1.85 (OpenSim 2.15 / 1.77), moment calibrated, force ~30 % low, MAE 0.45 — closest of any checkpoint. Interim recommendation for the gait optimizer until fine-tuned weights exist. |
 | `runs/mlp/…_walking_…_contact_w20_e90_2.pt` | 238 ch, plain MSE, **walking trials only** | 0.277 BW | 88 % | Static held-out 0.422 BW (never saw static — do not use for quasi-static queries). On the locked-knee motion with drift removed: 1.63 / 1.61 BW, crosses in both stances, MAE 0.64, peaks 30–70 % high. Specialist for gait windows. |
 | `runs/mlp/incomplete/…_w20_fmW0p5.pt` | 198 ch | 0.311 BW | 61 % | The file on disk is a 2-epoch checkpoint — do not use. |
 | `runs/mlp/…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | — | — | Not recommended (see *Pelvis centering*). |
@@ -157,6 +159,11 @@ no re-inference needed.
 
 ## Pelvis centering (read this before running any overground trajectory)
 
+> **`…_notrans_…` checkpoints (input set `qinst_notrans_pelvisrel_winpos_contact_w20`, 235 channels) do not use
+> `pelvis_tx/ty/tz` at all.** Pass the same 16 joint angles as for any other checkpoint; the three translations are
+> dropped inside the module, have no effect on the output and receive no gradient. Nothing in this section applies
+> to them. Pelvis tilt/list/rotation and all COM/foot-relative-to-pelvis windows are unchanged.
+
 The model never sees absolute lab position: at training time `pelvis_tx/ty/tz` were zero-centered
 **per trial**, and `predict_windowed` reproduces this by subtracting the **batch mean** of `q[:, 3:6]`.
 About 90 % of the training frames are treadmill trials (Carter, Moore, Han), where the centered pelvis
@@ -171,10 +178,15 @@ Subtract a stride-scale running mean (about 1 s, centred) from `pelvis_tx/ty/tz`
 `skip_pelvis_centering=True`:
 
 ```python
-from scipy.ndimage import uniform_filter1d
-q_traj[:, 3:6] -= uniform_filter1d(q_traj[:, 3:6], size=120, axis=0, mode="nearest")   # 120 frames = 1.2 s at 100 Hz
+from inference_posture_surrogate import remove_pelvis_drift
+q_traj[:, 3:6] = remove_pelvis_drift(q_traj[:, 3:6], fs_hz=100.0)   # centred 1.2 s running mean, ends extrapolated
 out = m.predict_windowed(q_traj[k], ..., skip_pelvis_centering=True)
 ```
+
+`remove_pelvis_drift` extends the pelvis path at constant velocity (fitted over the first/last 0.5 s) 0.6 s beyond
+each end before averaging, so the first and last 0.6 s carry no residual drift. Padding with the edge value or
+averaging only the available frames leaves a residual of ~0.15·v or ~0.3·v (v = walking speed) in those frames;
+identical results for trajectories that start and stop at rest, but outside the training range for a cut mid-walk.
 
 Measured on the 323-trial walking held-out set and the 119-trial static set (F_medial MAE, BW):
 
@@ -187,9 +199,15 @@ Measured on the 323-trial walking held-out set and the 119-trial static set (F_m
 - The running mean removes the ±0.9 m drift on the Sep 23 trajectory (fed range becomes 0.09 m, inside the
   treadmill training range) and gives the same predictions there as zeroing, while costing 0–9 % on real gait
   instead of 10–20 %. The within-stride pelvis oscillation is a real signal the models learned.
-- Zeroing (`q_in[3:6] = 0`) is the simplest fallback and gives a constant input (block-diagonal Jacobian). Inside an
-  optimizer, compute the running mean once from the *reference* trajectory and freeze it per knot to get the same
-  sparsity with the running-mean treatment.
+- Zeroing (`q_in[3:6] = 0`) is the simplest fallback and gives a constant input (block-diagonal Jacobian).
+- **Inside an optimizer, do not back-propagate through `pelvis_tx/ty/tz`.** Feed the drift-removed values of the
+  *reference* trajectory as constants (forward pass unchanged, gradient zero). The models are very sensitive to pelvis
+  height relative to its local mean (walking fmW0.5 model: 0.27 BW per cm; paper base model with global-mean
+  centering: 0.49 BW per cm, against ~0.02 BW per degree of knee or hip motion). In the training data that channel
+  tracks gait phase (the within-stride bob), so pushing it changes the model's reading of *where in the step* the
+  posture is, not the knee load. On the Sep 23 reference, raising only the pelvis input by 1.3 cm (the lift in the
+  paper's optimized trajectory), with no joint change at all, drops the base model's stance-2 peak from 1.86 to 1.23 BW.
+  Pelvis rotations and the COM/foot windows are posture-driven and keep their gradients.
 - Do **not** subtract a single trajectory mean for overground motion. Earlier versions of this guide recommended it;
   it is what produces the artefact. For treadmill-like motion (pelvis range < 0.1 m) all treatments agree.
 - The `…_winctr_…` *checkpoint* is a different thing: a retrained model that validated worse. The advice above is about
@@ -202,7 +220,7 @@ evaluation. For backpropagation build the feature tensor yourself and call the n
 Feature layout (238):
 
 ```
-[0:16]     q16                    (pelvis tx/ty/tz drift-removed as above)
+[0:16]     q16                    (pelvis tx/ty/tz drift-removed as above; for `…_notrans_…`: [0:13] q13 without them, total 235)
 [16:236]   window, frame-major: for f in 0..19:
                com_rel[f] (3), rfoot_rel[f] (3), lfoot_rel[f] (3), r_contact[f] (1), l_contact[f] (1)
 [236:238]  mass_kg, height_m
