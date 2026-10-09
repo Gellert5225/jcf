@@ -30,6 +30,7 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 
 from train_cnn import load_subject, filter_flat_subjects, SEED, TRAIN_SPLIT
+import provenance as _prov
 
 DATA_ROOTS = {
     "static":  "./jcf/full_duration/training/static",
@@ -646,6 +647,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
       dq_method: 'central' (np.gradient, default) or 'forward' (William's
                  dq_k = (q_k - q_{k-1})/dt).
     """
+    _call_args = dict(locals())          # every train() argument, defaults included (provenance)
     torch.manual_seed(seed)
     np.random.seed(seed)
     n_features = feature_count(input_set)
@@ -792,6 +794,22 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=sched_patience, factor=0.5)
 
+    provenance = _prov.build(
+        call_args=_call_args,
+        hyperparameters=dict(
+            learning_rate=effective_lr, weight_decay=WEIGHT_DECAY, batch_size=BATCH_SIZE,
+            hidden=HIDDEN, dropout=effective_dropout, epochs=n_epochs, lr_patience=sched_patience,
+            train_split=TRAIN_SPLIT, contact_grf_bw_threshold=CONTACT_GRF_BW_THRESHOLD,
+            n_features=n_features, data_roots=DATA_ROOTS),
+        splits={act: dict(train_subjects=_prov.subject_ids(train_dirs_by.get(act, []), _subject_id),
+                          val_subjects=_prov.subject_ids(val_dirs_by.get(act, []), _subject_id),
+                          n_train_trials=len(train_dirs_by.get(act, [])),
+                          n_val_trials=len(val_dirs_by.get(act, [])))
+                for act in sorted(set(train_dirs_by) | set(val_dirs_by))},
+        extra=dict(n_train_frames=len(train_ds.frames_in), n_val_frames=len(val_ds.frames_in),
+                   n_params=n_params))
+    _prov.announce(provenance)
+
     # Per-sample subject height (m) recovery for the F_medial loss term.
     # Requires include_height=True with height stored at the last input channel
     # (true for all COM variants and for qfmh/qdqfmh).
@@ -911,6 +929,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 "extra_weight": extra_weight,
                 "tag": tag,
                 "lr": effective_lr,
+                "provenance": provenance,
             }, os.path.join(output_root, ckpt_name))
             print(f"  → saved (val={val_loss:.6f}) → {output_root}/{ckpt_name}")
 

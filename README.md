@@ -17,6 +17,7 @@ All scripts are run from the repository root (data paths are relative to `./jcf/
 | `train_mlp.py`, `test_mlp.py` | GRF-free per-frame MLP variants, selected with `--input-set` (incl. the contact-flag variant `qinst_pelvisrel_winpos_contact_w20`). |
 | `inference.py` | BiCNN inference module (`JCFPredictor`) — `docs/INFERENCE_GUIDE.md` |
 | `inference_posture_surrogate.py` | GRF-free MLP inference (`JCFPostureSurrogate`) — `docs/INFERENCE_GUIDE_MLP.md` |
+| `provenance.py` | Records how each checkpoint was trained (command, arguments, hyperparameters, git commit, train/val subjects) under `ckpt["provenance"]`; `python provenance.py <ckpt>` prints it |
 | `infer_trajectory_csv.py` | Runs an exported trajectory CSV through the MLP (frame rotation, q reorder, contact flags, windowing) |
 | `test_inference.py` | Parity check of `inference.py` against the `test_cnn.py` pipeline |
 | `pipeline/` | Label generation: `.b3d` → OpenSim → SO+JR (`batch_process.py`, `batch_process_parallel.py`, `b3d_to_opensim.py`, `process_jcf.py`, `label_trajectory_csv.py` (optimizer CSV → SO+JR labels, `docs/LABEL_AND_FINETUNE_GUIDE.md`), `compute_com_features.py`, `extract_root_features.py`, `validate_training_data.py`, …) |

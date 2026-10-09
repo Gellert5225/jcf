@@ -86,3 +86,8 @@ optimizer's gait family the extra bucket needs on the order of 20–30 trajector
 
 Every fine-tuned checkpoint stores `init_from`, `extra_dirs`, `extra_weight`, `lr` and `tag`, so
 `torch.load(ckpt)["extra_dirs"]` tells you what it was tuned on.
+
+Since 2026-10-09 every checkpoint from `train_mlp.py` and `train_cnn.py` also carries a full record under
+`ckpt["provenance"]`: the exact command line, every `train()` argument including defaults, the effective
+hyperparameters, the git commit (with a warning if tracked files had uncommitted changes) and the train/validation
+subject IDs. Print it with `python provenance.py <checkpoint>`. Commit before training so the record shows `clean`.

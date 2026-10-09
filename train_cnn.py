@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+import provenance as _prov
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -923,6 +924,7 @@ class JCF_Transformer(nn.Module):
 # ─── Training ─────────────────────────────────────────────────────────────────
 
 def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10.0, seed=SEED):
+    _call_args = dict(locals())          # every train() argument, defaults included (provenance)
     torch.manual_seed(seed)
     np.random.seed(seed)
     seed_suffix = f"_s{seed}" if seed != SEED else ""
@@ -1166,6 +1168,17 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=5, factor=0.5
     )
+
+    provenance = _prov.build(
+        call_args=_call_args,
+        hyperparameters=dict(learning_rate=LEARNING_RATE, weight_decay=1e-4, batch_size=BATCH_SIZE,
+                             epochs=EPOCHS, lr_patience=5, train_split=TRAIN_SPLIT,
+                             n_features=n_features),
+        splits={'all': dict(train_subjects=_prov.subject_ids(train_dirs, _subject_id),
+                            val_subjects=_prov.subject_ids(val_dirs, _subject_id),
+                            n_train_trials=len(train_dirs), n_val_trials=len(val_dirs))},
+        extra=dict(n_params=n_params))
+    _prov.announce(provenance)
 
     def masked_mse(preds, labels, mask, confidence=None):
         mask_3d = mask.unsqueeze(-1)
@@ -1441,6 +1454,7 @@ def train(exp=None, filter_flat=True, dataset=None, exclude=None, max_peak_bw=10
                 'predict_moment': predict_moment,
                 'predict_flexion_moment': predict_flexion_moment,
                 'n_outputs': n_outputs,
+                'provenance': provenance,
             }, os.path.join(CKPT_ROOT, model_name))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
 
