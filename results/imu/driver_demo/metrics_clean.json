@@ -1,0 +1,42 @@
+{
+ "log": "driver CSV log (see docs/PN3_REDIS_DRIVER.md)",
+ "frames": 479,
+ "rate_hz": 59.998800023999564,
+ "angle_rmse_deg": {
+  "pelvis_list": 0.0887457091661479,
+  "pelvis_rotation": 0.1157389326122358,
+  "hip_flexion_r": 0.4963634531207027,
+  "hip_adduction_r": 0.20204763829134845,
+  "hip_rotation_r": 0.20049630588235548,
+  "knee_angle_r": 0.9259373834165259,
+  "ankle_angle_r": 0.258084211943927,
+  "hip_flexion_l": 0.16620448225936627,
+  "hip_adduction_l": 0.11543388619767017,
+  "hip_rotation_l": 0.35041701845788087,
+  "knee_angle_l": 0.6827632261729383,
+  "ankle_angle_l": 0.3149025432434747,
+  "lumbar_extension": 0.1887453908575956,
+  "lumbar_bending": 0.12106980612363621,
+  "lumbar_rotation": 0.18584436154673914
+ },
+ "angle_rmse_deg_max": 0.9259373834165259,
+ "pelvis_height_rmse_m": 0.008725292335968174,
+ "pelvis_lateral_rmse_m": 0.016553171262777888,
+ "forward_speed_mps": 1.3385202881594491,
+ "belt_speed_mps": 1.3017460870705335,
+ "contact_agreement": {
+  "r": 0.9,
+  "l": 0.8533333333333334
+ },
+ "contact_agreement_surrogate": {
+  "r": 0.9594594594594594,
+  "l": 0.9391891891891891
+ },
+ "f_medial": {
+  "mae": 0.23179427158892135,
+  "mae_stance": 0.3372545076600498,
+  "r": 0.9466651778812365,
+  "latency_s": 0.08999999999999986
+ },
+ "noise_deg": 0.0
+}

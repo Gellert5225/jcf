@@ -1,0 +1,10 @@
+<!-- OpenSai configuration: visualize the PN3 driver's human model, no simulation and no controller.
+     Prefix "sai" matches the driver's namespace sai::sensors::pn3 (OpenSai's own examples use "opensai").
+     Run from the OpenSai root:  ./bin/OpenSai_main pn3_viz.xml   (start redis-server first) -->
+<redisConfiguration namespacePrefix="sai" />
+
+<simvizConfiguration worldFilePath="${WORLD_FILES_FOLDER}/world_pn3.urdf"
+	mode="vizOnly"
+	publishMassMatrixToRedis="false">
+	<logger logFolderName="log_files/pn3/simviz" enabledAtStartup="false" />
+</simvizConfiguration>

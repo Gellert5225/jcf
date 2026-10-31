@@ -18,7 +18,9 @@ All scripts are run from the repository root (data paths are relative to `./jcf/
 | `inference.py` | BiCNN inference module (`JCFPredictor`) — `docs/INFERENCE_GUIDE.md` |
 | `inference_posture_surrogate.py` | GRF-free MLP inference (`JCFPostureSurrogate`) — `docs/INFERENCE_GUIDE_MLP.md` |
 | `tools/evaluate_fmedial.py` | Evaluation harness: scores GRF-free checkpoints on the held-out test split, reporting F_medial and its force and moment parts per person, lab and pooled, a phi/d sweep, seed ensembles and the paper check; writes `results/fmedial_eval/<name>/` |
-| `tests/` | `python -m pytest tests -q`: unit tests for the harness, plus a one-trial end-to-end run |
+| `imu/` | IMU groundwork (Perception Neuron 3 suit → OpenSense IK → no-pelvis-translation surrogate): BVH reader, OpenSense I/O and IK, contact detection without force plates, virtual-IMU validation on mocap trials — `docs/IMU_PIPELINE.md` |
+| `pn3_redis/` | Perception Neuron 3 → Redis driver for OpenSai: UKF over the Rajagopal joint state from suit orientations, contact-anchored pelvis, optional live knee-load surrogate, live monitor — `docs/PN3_REDIS_DRIVER.md` |
+| `tests/` | `python -m pytest tests -q`: unit tests for the harness and the numpy parts of `imu/`, plus a one-trial end-to-end run |
 | `provenance.py` | Records how each checkpoint was trained (command, arguments, hyperparameters, git commit, train/val subjects) under `ckpt["provenance"]`; `python provenance.py <ckpt>` prints it |
 | `infer_trajectory_csv.py` | Runs an exported trajectory CSV through the MLP (frame rotation, q reorder, contact flags, windowing) |
 | `test_inference.py` | Parity check of `inference.py` against the `test_cnn.py` pipeline |

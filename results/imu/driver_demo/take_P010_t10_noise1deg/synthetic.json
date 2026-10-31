@@ -1,0 +1,23 @@
+{
+ "trial_dir": "jcf/full_duration/testing/walking/carter_P010_split0_t10",
+ "labels": [
+  "pelvis_imu",
+  "femur_r_imu",
+  "tibia_r_imu",
+  "calcn_r_imu",
+  "femur_l_imu",
+  "tibia_l_imu",
+  "calcn_l_imu",
+  "torso_imu"
+ ],
+ "calib_s": 0.9999999999999787,
+ "n_calib_frames": 100,
+ "fs": 100.00000000000213,
+ "time_offset": -0.9999999999999787,
+ "t0": 0.0,
+ "t1": 7.99,
+ "noise_deg": 1.0,
+ "noise_corr_s": 0.1,
+ "drift_deg_per_s": 0.0,
+ "seed": 0
+}

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<!-- sai-interfaces page for the PN3 driver. Serve with:
+       python3 <sai-interfaces>/ui/server.py pn3_live.html -hp 8001 -rate 0.033
+     then open http://localhost:8001. Run the driver WITHOUT --stream: a Redis stream key breaks the UI's key cache. -->
+<html>
+<head>
+	<meta charset="UTF-8">
+	<title>PN3 live</title>
+	<link rel="stylesheet" href="./css/picnic.min.css">
+	<link rel="stylesheet" href="./css/range_input.css">
+	<link rel="stylesheet" href="./css/global_styles.css">
+	<link rel="stylesheet" href="./css/chosen.min.css">
+	<link rel="stylesheet" href="./bootstrap/css/bootstrap.min.css">
+	<script src="./js/library/jquery-3.3.1.min.js"></script>
+	<script src="./js/library/chosen.jquery.min.js"></script>
+	<script src="./js/library/plotly.min.js"></script>
+	<script src="./js/library/socket.io.js"></script>
+	<script src="./bootstrap/js/bootstrap.bundle.min.js"></script>
+	<script type="module" src="./js/index.js"></script>
+</head>
+<body>
+	<div class="container">
+		<h3>Perception Neuron 3: live knee load</h3>
+		<sai-interfaces-display key="sai::sensors::pn3::f_medial" display="medial knee force (BW)" refreshRate="0.2" decimalPlaces="2"></sai-interfaces-display>
+		<sai-interfaces-display key="sai::sensors::pn3::contact" display="foot contact [right, left]" refreshRate="0.2" decimalPlaces="0" displayAsRowVector></sai-interfaces-display>
+		<!-- pick sai::sensors::pn3::f_medial (and ::contact) in the plot's key list, then Start -->
+		<sai-interfaces-plot></sai-interfaces-plot>
+	</div>
+</body>
+</html>

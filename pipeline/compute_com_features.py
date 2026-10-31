@@ -16,6 +16,12 @@ Usage:
     conda run -n jcf python pipeline/compute_com_features.py --limit 200      # quick test on first 200 trials
     conda run -n jcf python pipeline/compute_com_features.py --workers 8      # parallel
     conda run -n jcf python pipeline/compute_com_features.py --overwrite      # recompute even if cached
+
+With --foot-point X Y Z, it caches only the two foot positions, at that point in each calcn body frame
+(metres, OpenSim calcn axes: x forward, y up, z right) instead of the calcn origin, to
+<trial_dir>/foot_point_<X>_<Y>_<Z>.npz. com_features.npz is not touched. Input sets with a "foot_point"
+entry in train_mlp.INPUT_SETS read that file for their foot channels:
+    conda run -n jcf python pipeline/compute_com_features.py --foot-point 0.13 0 -0.01 --workers 8
 """
 import os
 import sys
@@ -43,13 +49,20 @@ def load_mot(path, skiprows=6):
     return pd.read_csv(path, sep=r"\s+", skiprows=skiprows)
 
 
-def compute_for_trial(trial_dir, overwrite=False):
-    """Compute COM and per-foot positions for one trial. Returns status string."""
+def foot_point_filename(point):
+    """Cache file name for foot positions at `point` in the calcn frames, e.g. foot_point_0.130_0.000_-0.010.npz."""
+    return "foot_point_" + "_".join(f"{float(v):.3f}" for v in point) + ".npz"
+
+
+def compute_for_trial(trial_dir, overwrite=False, foot_point=None):
+    """Compute COM and per-foot positions for one trial (or, with foot_point, only the
+    foot positions at that calcn-frame point). Returns status string."""
     opensim = _opensim()
 
     model_path = os.path.join(trial_dir, "scaled_model.osim")
     ik_path = os.path.join(trial_dir, "ik_results.mot")
-    out_path = os.path.join(trial_dir, "com_features.npz")
+    out_path = os.path.join(trial_dir, foot_point_filename(foot_point) if foot_point is not None
+                            else "com_features.npz")
 
     if os.path.exists(out_path) and not overwrite:
         return "skip"
@@ -85,6 +98,7 @@ def compute_for_trial(trial_dir, overwrite=False):
     calcn_l_pos = np.zeros((T, 3), dtype=np.float64)
 
     zero_vec = opensim.Vec3(0.0, 0.0, 0.0)
+    foot_vec = opensim.Vec3(*[float(v) for v in foot_point]) if foot_point is not None else zero_vec
 
     # Read column data once into numpy for speed
     ik_arr = {name: ik[name].values for _, name in coord_to_ik_col.items()}
@@ -94,20 +108,31 @@ def compute_for_trial(trial_dir, overwrite=False):
             coord_set.get(i).setValue(state, float(ik_arr[name][t]), False)
         model.realizePosition(state)
 
-        com_vec = model.calcMassCenterPosition(state)
-        com_pos[t, 0] = com_vec.get(0)
-        com_pos[t, 1] = com_vec.get(1)
-        com_pos[t, 2] = com_vec.get(2)
+        if foot_point is None:
+            com_vec = model.calcMassCenterPosition(state)
+            com_pos[t, 0] = com_vec.get(0)
+            com_pos[t, 1] = com_vec.get(1)
+            com_pos[t, 2] = com_vec.get(2)
 
-        r_vec = calcn_r.findStationLocationInGround(state, zero_vec)
+        r_vec = calcn_r.findStationLocationInGround(state, foot_vec)
         calcn_r_pos[t, 0] = r_vec.get(0)
         calcn_r_pos[t, 1] = r_vec.get(1)
         calcn_r_pos[t, 2] = r_vec.get(2)
 
-        l_vec = calcn_l.findStationLocationInGround(state, zero_vec)
+        l_vec = calcn_l.findStationLocationInGround(state, foot_vec)
         calcn_l_pos[t, 0] = l_vec.get(0)
         calcn_l_pos[t, 1] = l_vec.get(1)
         calcn_l_pos[t, 2] = l_vec.get(2)
+
+    if foot_point is not None:
+        np.savez(
+            out_path,
+            time=time.astype(np.float32),
+            calcn_r_pos=calcn_r_pos.astype(np.float32),
+            calcn_l_pos=calcn_l_pos.astype(np.float32),
+            foot_point=np.asarray(foot_point, dtype=np.float64),
+        )
+        return "ok"
 
     # Numerical COM velocity (central diff via np.gradient)
     if T >= 2:
@@ -126,9 +151,9 @@ def compute_for_trial(trial_dir, overwrite=False):
     return "ok"
 
 
-def _safe_compute(trial_dir, overwrite=False):
+def _safe_compute(trial_dir, overwrite=False, foot_point=None):
     try:
-        return (trial_dir, compute_for_trial(trial_dir, overwrite=overwrite))
+        return (trial_dir, compute_for_trial(trial_dir, overwrite=overwrite, foot_point=foot_point))
     except Exception as e:
         return (trial_dir, f"error:{e}")
 
@@ -145,7 +170,11 @@ def main():
                         "heavy so 4-8 workers usually peaks throughput.")
     p.add_argument("--exclude", type=str, nargs="+", default=None,
                    help="Exclude dataset prefixes (e.g. han fregly).")
+    p.add_argument("--foot-point", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"),
+                   help="Cache only the foot positions at this point in each calcn frame (m), to "
+                        "foot_point_<X>_<Y>_<Z>.npz, instead of com_features.npz.")
     args = p.parse_args()
+    fp = tuple(args.foot_point) if args.foot_point else None
 
     excluded = set(args.exclude) if args.exclude else set()
 
@@ -165,13 +194,14 @@ def main():
     if args.limit:
         trial_dirs = trial_dirs[: args.limit]
 
-    print(f"Processing {len(trial_dirs)} trials with {args.workers} worker(s)...")
+    print(f"Processing {len(trial_dirs)} trials with {args.workers} worker(s)"
+          + (f", foot point {fp} -> {foot_point_filename(fp)}" if fp else "") + "...")
 
     counts = {"ok": 0, "skip": 0, "missing": 0, "error": 0}
 
     if args.workers <= 1:
         for i, td in enumerate(trial_dirs):
-            _, status = _safe_compute(td, overwrite=args.overwrite)
+            _, status = _safe_compute(td, overwrite=args.overwrite, foot_point=fp)
             key = "error" if status.startswith("error") or status.startswith("no_feet") else status
             counts[key] = counts.get(key, 0) + 1
             if (i + 1) % 100 == 0:
@@ -179,7 +209,7 @@ def main():
             if status.startswith("error") or status.startswith("no_feet"):
                 print(f"  ERROR {td}: {status}", flush=True)
     else:
-        worker = partial(_safe_compute, overwrite=args.overwrite)
+        worker = partial(_safe_compute, overwrite=args.overwrite, foot_point=fp)
         with mp.Pool(processes=args.workers) as pool:
             for i, (td, status) in enumerate(pool.imap_unordered(worker, trial_dirs, chunksize=4)):
                 key = "error" if status.startswith("error") or status.startswith("no_feet") else status

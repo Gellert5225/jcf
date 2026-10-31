@@ -1,8 +1,8 @@
 # F_medial evaluation · test_split_v1
 
-- created: 2026-10-09T16:05:55
+- created: 2026-10-09T16:09:02
 - command: `python tools/evaluate_fmedial.py --ckpt models/mlp-grffree-base/mlp-grffree-base.pt models/mlp-grffree-contact/mlp-grffree-contact.pt models/runs/mlp/best_model_mlp_both_qinst_pelvisrel_winpos_contact_w20.pt models/runs/mlp/best_model_mlp_walking_qinst_pelvisrel_winpos_contact_w20_fmW0p5_e100_2.pt models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_fmW0p5_e100_2.pt --labels paper contact-fmW contact-mse walk-fmW september --phi 0.4 0.5 0.6 --d-mm 40 45 50 --plots --name test_split_v1`
-- git: 023ffb83edc72b6cacf0b51739d029693d6fd5ba (DIRTY)
+- git: 6687dc293dd10c4b2d76ee703c3ff7f55e549812 (clean)
 - split: test; activities: walking, static; excluded labs: none; pelvis: trial; phi=0.5, d=45.0 mm; limit 1.4 BW; no flat filter
 - trials evaluated: 653; rejected by the label filters: 59 (moore 59)
 
