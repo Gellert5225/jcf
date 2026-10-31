@@ -31,6 +31,7 @@ from sklearn.model_selection import train_test_split
 
 from train_cnn import load_subject, filter_flat_subjects, SEED, TRAIN_SPLIT
 import provenance as _prov
+from pipeline.compute_com_features import foot_point_filename
 
 DATA_ROOTS = {
     "static":  "./jcf/full_duration/training/static",
@@ -228,6 +229,51 @@ INPUT_SETS = {
         "n_features_total": 13 + 20 * 11 + 2,   # 235
         "desc": "qinst_pelvisrel_winpos_contact_w20 without pelvis_tx/ty/tz = 235 ch",
     },
+    # Same as qinst_notrans_pelvisrel_winpos_contact_w20, but each foot is the point
+    # (0.13, 0, -0.01) m in its calcn frame (x forward, y up, z right; same point for
+    # both feet) instead of the calcn origin, to match the optimizer's foot point.
+    # Needs the foot_point_0.130_0.000_-0.010.npz cache from
+    # pipeline/compute_com_features.py --foot-point 0.13 0 -0.01.
+    "qinst_notrans_pelvisrel_winpos_contact_fp13_w20": {
+        "base_indices": None,
+        "include_height": True,
+        "include_bmi": False,
+        "uses_com": True,
+        "uses_pelvis_rel": True,
+        "replicate_q": False,
+        "window_only_positions": True,
+        "include_contact": True,
+        "drop_pelvis_translation": True,
+        "foot_point": (0.13, 0.0, -0.01),
+        "q_dim": 13,
+        "window": 20,
+        "per_frame_ch": 26,
+        "n_pos": 11,
+        "n_features_total": 13 + 20 * 11 + 2,   # 235
+        "desc": "qinst_notrans_pelvisrel_winpos_contact_w20 with feet at calcn (0.13, 0, -0.01) = 235 ch",
+    },
+    # The optimizer's foot point: (0.13, 0, -0.01) in the Rajagopal URDF's Z-up calcn link axes, which is
+    # (0.13, -0.01, 0) in OpenSim calcn axes (13 cm forward, 1 cm below the origin, centred; same on both feet).
+    # The fp13 set above took the URDF numbers as OpenSim axes. Needs the foot_point_0.130_-0.010_0.000.npz
+    # cache from pipeline/compute_com_features.py --foot-point 0.13 -0.01 0.
+    "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20": {
+        "base_indices": None,
+        "include_height": True,
+        "include_bmi": False,
+        "uses_com": True,
+        "uses_pelvis_rel": True,
+        "replicate_q": False,
+        "window_only_positions": True,
+        "include_contact": True,
+        "drop_pelvis_translation": True,
+        "foot_point": (0.13, -0.01, 0.0),
+        "q_dim": 13,
+        "window": 20,
+        "per_frame_ch": 26,
+        "n_pos": 11,
+        "n_features_total": 13 + 20 * 11 + 2,   # 235
+        "desc": "qinst_notrans_pelvisrel_winpos_contact_w20 with feet at the optimizer's point, calcn (0.13, -0.01, 0) = 235 ch",
+    },
 }
 
 CONTACT_GRF_BW_THRESHOLD = 0.05   # vertical GRF (BW) above which a foot counts as in contact
@@ -298,19 +344,27 @@ def _replace_dq_with_forward_diff(inputs, dt=0.01):
     return inputs
 
 
-def _load_com_features_aligned(subj_dir, target_time):
+def _load_com_features_aligned(subj_dir, target_time, foot_point=None):
     """Load com_features.npz for one trial and interpolate every channel onto
     target_time (in seconds). Returns dict of arrays each [T, 3] aligned to
     target_time, or None if features aren't cached.
+
+    With foot_point, calcn_r_pos / calcn_l_pos come from that point's cache
+    (foot_point_<x>_<y>_<z>.npz) instead of the calcn origins.
     """
     path = os.path.join(subj_dir, "com_features.npz")
     if not os.path.exists(path):
         return None
-    f = np.load(path)
-    src_t = f["time"]
-    out = {}
-    for key in ("com_pos", "com_vel", "calcn_r_pos", "calcn_l_pos"):
-        arr = f[key]
+    sources = {key: path for key in ("com_pos", "com_vel", "calcn_r_pos", "calcn_l_pos")}
+    if foot_point is not None:
+        fp_path = os.path.join(subj_dir, foot_point_filename(foot_point))
+        if not os.path.exists(fp_path):
+            return None
+        sources["calcn_r_pos"] = sources["calcn_l_pos"] = fp_path
+    out, files = {}, {}
+    for key, src in sources.items():
+        f = files.setdefault(src, np.load(src))
+        src_t, arr = f["time"], f[key]
         out[key] = np.column_stack([
             np.interp(target_time, src_t, arr[:, j]) for j in range(3)
         ]).astype(np.float32)
@@ -368,7 +422,7 @@ def _build_com_features(subj_dir, cfg, max_peak_bw, min_length, predict_moment):
     # then slice. But for COM interpolation, near-uniform spacing matters more
     # than exact alignment.
 
-    com = _load_com_features_aligned(subj_dir, t_target)
+    com = _load_com_features_aligned(subj_dir, t_target, foot_point=cfg.get("foot_point"))
     if com is None:
         return None
 
@@ -679,6 +733,20 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         print(f"[{act}] train: {ns_train} subjects ({len(td)} trials), "
               f"val: {ns_val} subjects ({len(vd)} trials)")
 
+    # Foot-point variants: every trial with com_features.npz must also have the foot-point
+    # cache, or the trial set would silently differ from the calcn-origin model's.
+    fp = INPUT_SETS[input_set].get("foot_point")
+    if fp is not None:
+        fp_name = foot_point_filename(fp)
+        missing = [d for dirs in list(train_dirs_by.values()) + list(val_dirs_by.values()) for d in dirs
+                   if os.path.exists(os.path.join(d, "com_features.npz"))
+                   and not os.path.exists(os.path.join(d, fp_name))]
+        if missing:
+            raise SystemExit(f"{len(missing)} trials lack {fp_name} (e.g. {missing[0]}). Cache it first:\n"
+                             f"    conda run -n jcf python pipeline/compute_com_features.py --foot-point "
+                             f"{' '.join('%g' % v for v in fp)} --workers 8")
+        print(f"Foot point: {fp} in the calcn frames ({fp_name})")
+
     # Fine-tuning: external labelled trials (e.g. jcf/external/<traj>_seg1, made by
     # pipeline/label_trajectory_csv.py) join training as their own sampling bucket,
     # bypassing the flat filter and the subject split.
@@ -924,6 +992,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 "base_indices": INPUT_SETS[input_set]["base_indices"],
                 "include_height": INPUT_SETS[input_set]["include_height"],
                 "include_bmi": INPUT_SETS[input_set]["include_bmi"],
+                "foot_point": list(INPUT_SETS[input_set].get("foot_point", (0.0, 0.0, 0.0))),
                 "init_from": init_from,
                 "extra_dirs": extra_dirs,
                 "extra_weight": extra_weight,

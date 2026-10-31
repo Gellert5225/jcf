@@ -14,6 +14,12 @@ This is the variant designed for William's posture-optimizer use case:
       pelvis in world frame) are taken over a 20-frame window centered on
       the current sample.
 
+Foot point: x_r / x_l are a fixed point on each calcn body, `predictor.foot_point` in the calcn frame
+(OpenSim axes, x forward, y up, z right; metres). It is the calcn origin, (0, 0, 0), for every checkpoint
+except *_fp13_* (0.13, 0, -0.01), and *_fpopt_* (0.13, -0.01, 0), the optimizer's foot point, which is
+(0.13, 0, -0.01) in the Rajagopal URDF's Z-up link axes. Pass positions of that point (see
+docs/INFERENCE_GUIDE_MLP.md, "Foot point").
+
 For a pure static query the position window is just the current snapshot
 replicated 20 times — matches how the model saw quiet-stance trials during
 training. For walking, pass the actual 20-frame trajectory ending at (or
@@ -160,6 +166,8 @@ class JCFPostureSurrogate:
         "qinst_pelvisrel_winpos_winctr_w20",   # per 20-frame-window centering
         "qinst_pelvisrel_winpos_contact_w20",  # + windowed R/L contact flags
         "qinst_notrans_pelvisrel_winpos_contact_w20",  # contact, without pelvis_tx/ty/tz (235 ch)
+        "qinst_notrans_pelvisrel_winpos_contact_fp13_w20",  # as above, feet at calcn (0.13, 0, -0.01)
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20",  # as above, feet at calcn (0.13, -0.01, 0) = URDF (0.13, 0, -0.01)
     )
 
     def __init__(self, checkpoint_path, device=None):
@@ -183,6 +191,9 @@ class JCFPostureSurrogate:
         # joint angles; the three translations are dropped here, so they have no effect
         # on the output and receive no gradient.
         self.drop_pelvis_translation = "_notrans_" in input_set
+        # Point on each calcn body whose position the foot channels expect (calcn frame, m).
+        # Checkpoints from before foot-point variants used the calcn origin.
+        self.foot_point = np.asarray(ckpt.get("foot_point", (0.0, 0.0, 0.0)), dtype=np.float64)
         self.n_pos_ch = N_POS_CH_CONTACT if self.include_contact else N_POS_CH
 
         self.n_features = ckpt["n_features"]

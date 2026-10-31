@@ -194,7 +194,7 @@ def _read_sto(path):
     return pd.read_csv(path, sep="\t", skiprows=hdr)
 
 
-def rejection_reason(d, max_peak):
+def rejection_reason(d, max_peak, foot_points=()):
     """Why the training loaders dropped a trial (best effort)."""
     try:
         meta = json.load(open(os.path.join(d, "metadata.json")))
@@ -202,6 +202,10 @@ def rejection_reason(d, max_peak):
         return "missing or unreadable metadata.json"
     if not os.path.exists(os.path.join(d, "com_features.npz")):
         return "missing com_features.npz"
+    from pipeline.compute_com_features import foot_point_filename
+    for fp in foot_points:
+        if fp is not None and not os.path.exists(os.path.join(d, foot_point_filename(fp))):
+            return f"missing {foot_point_filename(fp)}"
     try:
         j = _read_sto(os.path.join(d, "jcf_output", "BatchJCF_JointReaction_ReactionLoads.sto"))
         BW = float(meta["mass_kg"]) * 9.81; H = float(meta.get("height_m", 1.7))
@@ -353,7 +357,8 @@ def main(argv=None):
             elif len(labels) != T:
                 raise RuntimeError(f"{d}: input sets disagree on trial length ({len(labels)} vs {T})")
         if gt is None or len(preds) < len(models):
-            rejected.append(dict(meta, reason=rejection_reason(d, args.max_peak)))
+            fps = [INPUT_SETS[info["input_set"]].get("foot_point") for (_m, _mu, _sd, info) in models]
+            rejected.append(dict(meta, reason=rejection_reason(d, args.max_peak, fps)))
             continue
         stance = right_stance(d, args, T)
         if stance is None:

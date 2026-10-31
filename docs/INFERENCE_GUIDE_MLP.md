@@ -8,8 +8,9 @@ foot-contact flags. For the streaming BiCNN that consumes measured GRF, see `INF
 
 | File | Purpose |
 |---|---|
-| `inference_posture_surrogate.py` | Self-contained module: model class, feature construction, `JCFPostureSurrogate` |
-| `mlp-grffree-contact.pt` | **Recommended** checkpoint (in `models/mlp-grffree-contact/`; 238-channel input, contact flags). Run file: `runs/mlp/mlp-grffree-contact.pt` |
+| `inference_posture_surrogate.py` | Self-contained module: model class, feature construction, `JCFPostureSurrogate`. Needs the Oct 2026 version (with `foot_point`) for the fp13 checkpoint |
+| `runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt` | **For the gait optimizer** when its foot input is the URDF point (0.13, 0, −0.01) on each calcn link (235-channel input, no pelvis translation, contact flags). See *Foot point*. Not yet on Hugging Face |
+| `mlp-grffree-contact.pt` | Most accurate on real gait and quasi-static postures (in `models/mlp-grffree-contact/`; 238-channel input, contact flags, uses pelvis translation). Run file: `runs/mlp/mlp-grffree-contact.pt` |
 
 Dependencies: `numpy`, `torch`.
 
@@ -42,11 +43,20 @@ terms), so they are omitted.
 | `runs/mlp/…_contact_w20.pt` (contact-MSE) | 238 ch, plain MSE, all 6 labs | 0.252 BW | 80 % | Same inputs as `mlp-grffree-contact.pt`, no F_medial loss term. Static held-out 0.286 BW. On the Sep 23 locked-knee motion with pelvis drift removed: 0.93 / 0.91 BW in the two right stances (truth 1.76 / 1.17), never crosses 1.4 BW. |
 | `runs/mlp/…_both_…_contact_w20_e90_2.pt` | 238 ch, plain MSE, `--exclude han fregly` (paper's 4-lab pool) | 0.261 BW | 86 % | Static held-out 0.298 BW. On the locked-knee motion with drift removed: 1.37 / 1.38 BW, crosses 1.4 BW in both stances, MAE 0.46 — closest of any checkpoint there, but through a moment overshoot (peaks 15–30 % high). No gain on real gait over the base. Experimental. |
 | `runs/mlp/…_both_…_contact_w20_fmW0p5_e100_2.pt` | 238 ch, F_medial loss 0.5, `--exclude han fregly` | 0.225 BW | 92 % | Static held-out 0.229 BW. On the locked-knee motion: 0.58 / 0.61 BW with Mx ≈ 0, never crosses 1.4 BW — same behaviour as the curated fmW model, no advantage over it. |
-| `runs/mlp/…_walking_notrans_…_contact_w20_fmW0p5_e100_2.pt` | 235 ch: as the row below, **without pelvis_tx/ty/tz** | 0.232 BW | 77 % | Static 0.398 BW — gait windows only. Not exploitable through pelvis height (1.3 cm lift: 2.16 → 2.15 BW). On the locked-knee motion: peaks 2.42 / 2.16 (OpenSim 2.15 / 1.77), 44 % of frames over 1.4 BW. **Recommended inside the gait optimizer**; no pelvis centering needed. |
+| `runs/mlp/…_walking_notrans_…_contact_w20_fmW0p5_e100_2.pt` | 235 ch: as the walking-only fmW0.5 row below, **without pelvis_tx/ty/tz** | 0.232 BW | 77 % | Static 0.398 BW — gait windows only. Not exploitable through pelvis height (1.3 cm lift: 2.16 → 2.15 BW). On the locked-knee motion: stance means 1.46 / 1.02 (OpenSim 1.76 / 1.16), peaks 2.42 / 2.16 (OpenSim 2.15 / 1.77), 44 % of frames over 1.4 BW. For an optimizer whose foot input is the **calcn origin**; no pelvis centering needed. |
+| `runs/mlp/…_walking_notrans_…_contact_fpopt_w20_fmW0p5_e100.pt` (fpopt) | 235 ch: as the row above, foot = the optimizer's point, calcn (0.13, −0.01, 0) in OpenSim axes = (0.13, 0, −0.01) in URDF axes | same as the row above on the newer 6-person test split (0.249 vs 0.247 BW; stance peaks read 0.07 BW lower; `results/fmedial_eval/fpopt_vs_fp13`) | — | Same trials and recipe as the row above; only the foot point differs. On the locked-knee motion: stance means 1.27 / 0.94 (OpenSim 1.76 / 1.16), peaks 1.99 / 1.79, 44 % of frames over 1.4 BW, MAE 0.53 (row above: 0.57). **Recommended inside the gait optimizer when its foot input is the URDF point (0.13, 0, −0.01)** (William's setup, see *Foot point*). |
+| `runs/mlp/…_walking_notrans_…_contact_fp13_w20_fmW0p5_e100.pt` (fp13) | 235 ch: foot = calcn (0.13, 0, −0.01) in OpenSim axes, the URDF numbers read in the wrong axes | 0.246 BW on the same split | — | Superseded by fpopt. On the locked-knee motion: stance means 1.71 / 1.45, peaks 2.56 / 2.70, 58 % over 1.4 BW, MAE 0.59. |
 | `runs/mlp/…_walking_…_contact_w20_fmW0p5_e100_2.pt` | 238 ch, F_medial loss 0.5, **walking only**, `--exclude han fregly` | 0.216 BW | 85 % | Static held-out 0.394 BW — **gait windows only**. On the locked-knee motion with drift removed: peaks 2.30 / 1.85 (OpenSim 2.15 / 1.77), moment calibrated, force ~30 % low, MAE 0.45 — closest of any checkpoint. Interim recommendation for the gait optimizer until fine-tuned weights exist. |
 | `runs/mlp/…_walking_…_contact_w20_e90_2.pt` | 238 ch, plain MSE, **walking trials only** | 0.277 BW | 88 % | Static held-out 0.422 BW (never saw static — do not use for quasi-static queries). On the locked-knee motion with drift removed: 1.63 / 1.61 BW, crosses in both stances, MAE 0.64, peaks 30–70 % high. Specialist for gait windows. |
 | `runs/mlp/incomplete/…_w20_fmW0p5.pt` | 198 ch | 0.311 BW | 61 % | The file on disk is a 2-epoch checkpoint — do not use. |
 | `runs/mlp/…_winctr_w20_fmW0p5.pt` | 198 ch, per-window pelvis centering | — | — | Not recommended (see *Pelvis centering*). |
+
+**Run-to-run spread on the locked-knee motion.** The September, fpopt and fp13 rows tie on real gait (0.247 / 0.249 /
+0.246 BW), yet read the first locked-knee stance as 1.46 / 1.27 / 1.71 BW (OpenSim 1.76) and differ by up to 1 BW at
+single frames. The foot point is not the cause: feeding fp13 the exact optimizer point instead of its own changes it by
+0.016 BW on average. On postures outside the training data, the training run itself decides the reading, so do not
+trust any single checkpoint there (`figures/gt/trajectory_sep23_fpopt_vs_gt.png`). Fine-tuning on SO+JR labels of
+optimizer trajectories (*Known issue* below) is the remedy.
 
 Evidence for the held-out numbers: `figures/heldout/contact_vs_baseline_heldout_summary.png` (aggregate), `figures/heldout/contact_vs_baseline_heldout_carterP019.png` (one subject), and the table twin `figures/heldout/contact_vs_baseline_heldout_summary.csv`.
 
@@ -58,8 +68,8 @@ Evidence for the held-out numbers: `figures/heldout/contact_vs_baseline_heldout_
 |---|---|---|---|
 | `joint_angles` | `(16,)` / `(N,16)` | rad, m | Center-frame snapshot, order below |
 | `com_rel_window` | `(20,3)` / `(N,20,3)` | m | COM − pelvis, OpenSim ground frame, 20-frame window centered on the query |
-| `calcn_r_rel_window` | `(20,3)` / `(N,20,3)` | m | right foot (calcn_r origin) − pelvis |
-| `calcn_l_rel_window` | `(20,3)` / `(N,20,3)` | m | left foot − pelvis |
+| `calcn_r_rel_window` | `(20,3)` / `(N,20,3)` | m | right foot point − pelvis: the calcn_r origin, or `m.foot_point` on calcn_r (see *Foot point*) |
+| `calcn_l_rel_window` | `(20,3)` / `(N,20,3)` | m | left foot point − pelvis, same point on calcn_l |
 | `r_contact_window` | `(20,)` / `(N,20)` | 0/1 | right foot in contact, per frame **(contact checkpoint only)** |
 | `l_contact_window` | `(20,)` / `(N,20)` | 0/1 | left foot in contact, per frame **(contact checkpoint only)** |
 | `mass_kg`, `height_m` | scalars | kg, m | one subject per call |
@@ -92,9 +102,36 @@ def to_opensim(v):                      # (..., 3)
     return np.stack([x, z, -y], axis=-1)
 ```
 
-Sanity check after conversion: a standing right foot relative to the pelvis should come out
-near `(0, −0.95, +0.08)` m — about a metre *below* the pelvis in y, slightly to the right in z.
+Sanity check after conversion: a standing right foot (calcn origin) relative to the pelvis should come out
+near `(0, −0.95, +0.08)` m — about a metre *below* the pelvis in y, slightly to the right in z. For the fpopt
+point, x is about 0.13 m further forward.
 The most common integration bug is skipping this step; the symptom is medial-force peaks ~3× too low.
+
+### Foot point
+
+Each checkpoint expects the position of one fixed point on each calcn body, stored in the checkpoint and exposed as
+`m.foot_point` (metres, calcn frame, OpenSim axes: x forward, y up, z right). Compute it in the OpenSim ground frame
+and subtract the pelvis origin:
+
+```python
+p_foot = p_calcn + R_calcn @ m.foot_point        # R_calcn: calcn orientation in ground, p_calcn: calcn origin
+rfoot_rel = p_foot - p_pelvis                     # OpenSim ground axes, not rotated into the pelvis frame
+```
+
+| | OpenSim calcn axes | Rajagopal URDF link axes (Z-up) |
+|---|---|---|
+| every checkpoint except fpopt and fp13 | (0, 0, 0), calcn origin (= subtalar joint centre, back of the heel) | (0, 0, 0) |
+| fpopt checkpoint = foot point in William's Sep 23 optimizer log | (0.13, −0.01, 0) | (0.13, 0, −0.01) |
+| fp13 checkpoint (superseded) | (0.13, 0, −0.01) | (0.13, 0.01, 0) |
+
+The URDF re-expresses each OpenSim frame with C = [[1,0,0],[0,0,−1],[0,1,0]]: a point (x, y, z) in OpenSim axes is
+(x, −z, y) in URDF link axes, and (x, y, z) in URDF axes is (x, z, −y) in OpenSim axes. fp13 was trained with the
+URDF numbers read as OpenSim axes, 1.4 cm from the optimizer's point (1 cm to the side instead of 1 cm below); fpopt
+uses the exact point, centred and the same on both feet. Its features come from
+`pipeline/compute_com_features.py --foot-point 0.13 -0.01 0`.
+
+Match the point to the checkpoint: feeding a point 13 cm off (the URDF point into a calcn-origin checkpoint, or the
+reverse) shifts F_medial by about 0.05 BW on average and up to 0.35 BW at stance peaks on the same motion.
 
 ### Contact flags
 
