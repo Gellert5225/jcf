@@ -1,0 +1,71 @@
+{
+ "discovery": {
+  "n_found": 7991,
+  "n_stored": 7991,
+  "missing": 0,
+  "nonfinite": [
+   "tiziana_Subject12_t03"
+  ],
+  "n_flat": 172,
+  "n_trials": 7818,
+  "train_persons": 64,
+  "val_persons": 17,
+  "n_train": 6313,
+  "n_val": 1505,
+  "missing_foot_point": 0,
+  "seed": 1,
+  "train_split": 0.8
+ },
+ "runtime_s": 47.6,
+ "workers": 20,
+ "input_set": "qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc",
+ "filters_loaded": {
+  "max_peak_bw": 1000.0,
+  "max_moment_bwh": 1000.0
+ },
+ "quantiles_over_trials_with_kept_frames": {
+  "peak_all": [
+   7.656,
+   17.676,
+   23.717,
+   184.31
+  ],
+  "peak_kept": [
+   4.633,
+   6.597,
+   7.205,
+   8.505
+  ],
+  "peak_kept_frames": [
+   4.583,
+   6.501,
+   7.092,
+   8.498
+  ],
+  "mx_all": [
+   0.05,
+   0.942,
+   4.042,
+   51.33
+  ],
+  "mx_kept": [
+   0.026,
+   0.042,
+   0.048,
+   0.065
+  ],
+  "mx_kept_frames": [
+   0.026,
+   0.041,
+   0.046,
+   0.054
+  ]
+ },
+ "loader_check_6_015": {
+  "loader_rejected_at_6_015": 696,
+  "predicted_from_kept_frames": 696,
+  "agree": true,
+  "kept_frames_at_6_015": 369777,
+  "kept_frames_at_6_015_frac": 0.8287712220541268
+ }
+}

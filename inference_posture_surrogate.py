@@ -16,7 +16,9 @@ This is the variant designed for William's posture-optimizer use case:
 
 Foot point: x_r / x_l are a fixed point on each calcn body, `predictor.foot_point` in the calcn frame
 (OpenSim axes, x forward, y up, z right; metres). It is the calcn origin, (0, 0, 0), for every checkpoint
-except the *_fp13_* input set, which uses (0.13, 0, -0.01) for both feet. Pass positions of that point.
+except *_fp13_* (0.13, 0, -0.01), and *_fpopt_* (0.13, -0.01, 0), the optimizer's foot point, which is
+(0.13, 0, -0.01) in the Rajagopal URDF's Z-up link axes. Pass positions of that point (see
+docs/INFERENCE_GUIDE_MLP.md, "Foot point").
 
 For a pure static query the position window is just the current snapshot
 replicated 20 times — matches how the model saw quiet-stance trials during
@@ -48,8 +50,13 @@ Usage — walking with a position history (one query per call):
         height_m=1.75,
     )
 
-Sign convention for mx: external knee adduction moment (KAM), normalized by
-BW * H. mx > 0 corresponds to medial loading during right-stance.
+Sign convention for mx (Nov 2026): `mx` is the raw network output, the JointReaction moment of walker_knee_r about the
+tibia x axis (on and in tibia_r) / (BW * H), as in the training labels. Physically the medial-positive (adduction)
+moment is -mx at the right knee (analysis/thesis/knee_mx_sign.py, tests/test_knee_mx_sign.py). f_medial is
+    alpha * |fy| + mx_medial_sign * mx * H / d,      mx_medial = mx_medial_sign * mx
+with mx_medial_sign read from the checkpoint: -1 (physical) for the *_sojrqc checkpoints, which store it; +1 for
+every older checkpoint, which does not, so f_medial of those is unchanged (the ISRR 2026 / pipeline formula, kept so
+the optimizer results made with them stay reproducible). `predictor.mx_medial_sign` holds the value in use.
 
 Only depends on numpy + torch.
 """
@@ -152,6 +159,8 @@ class JCFPostureSurrogate:
     Default Schipplein-Andriacchi constants for the medial proxy:
         alpha = 0.5
         d_m   = 0.045 m
+    f_medial = alpha*|fy| + mx_medial_sign*mx*H/d_m, mx_medial_sign from the checkpoint (+1 when absent; see the
+    module docstring).
     """
 
     DEFAULT_ALPHA = 0.5
@@ -165,7 +174,18 @@ class JCFPostureSurrogate:
         "qinst_pelvisrel_winpos_contact_w20",  # + windowed R/L contact flags
         "qinst_notrans_pelvisrel_winpos_contact_w20",  # contact, without pelvis_tx/ty/tz (235 ch)
         "qinst_notrans_pelvisrel_winpos_contact_fp13_w20",  # as above, feet at calcn (0.13, 0, -0.01)
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20",  # as above, feet at calcn (0.13, -0.01, 0) = URDF (0.13, 0, -0.01)
+        # Nov 2026 "_t100" sets: trained on exactly aligned features at 100 Hz, which is what this module builds
+        "qinst_notrans_pelvisrel_winpos_contact_w20_t100",
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100",
+        # same inputs as the two above, trained on static optimization + joint reaction labels (jcf_output_sojr/)
+        "qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojr",
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojr",
+        # as the two above, trained only on QC-passing SO+JR frames with the physical M_x sign (mx_medial_sign -1)
+        "qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc",
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc",
     )
+    LEGACY_MX_MEDIAL_SIGN = 1.0   # checkpoints without "mx_medial_sign" (all before Nov 2026)
 
     def __init__(self, checkpoint_path, device=None):
         if device is None:
@@ -191,6 +211,11 @@ class JCFPostureSurrogate:
         # Point on each calcn body whose position the foot channels expect (calcn frame, m).
         # Checkpoints from before foot-point variants used the calcn origin.
         self.foot_point = np.asarray(ckpt.get("foot_point", (0.0, 0.0, 0.0)), dtype=np.float64)
+        # Factor on the raw right-knee mx in f_medial: what the checkpoint's F_medial loss used. Older checkpoints do
+        # not store it and keep the legacy +1, so their f_medial is unchanged.
+        self.mx_medial_sign = float(ckpt.get("mx_medial_sign", self.LEGACY_MX_MEDIAL_SIGN))
+        if self.mx_medial_sign not in (1.0, -1.0):
+            raise ValueError(f"mx_medial_sign must be +1 or -1, checkpoint has {self.mx_medial_sign}")
         self.n_pos_ch = N_POS_CH_CONTACT if self.include_contact else N_POS_CH
 
         self.n_features = ckpt["n_features"]
@@ -337,11 +362,13 @@ class JCFPostureSurrogate:
 
         Returns dict (scalars for single input, shape (N,) for batched):
             fx, fy, fz : forces in BW
-            mx         : KAM in BW * H (medial-loading-positive)
+            mx         : raw right-knee JR moment about the tibia x axis, BW * H (network output;
+                         physically medial-positive is -mx)
+            mx_medial  : mx_medial_sign * mx, the moment term f_medial uses, BW * H
             fy_n       : axial force in N
-            mx_nm      : KAM in N*m
+            mx_nm      : mx in N*m
             f_medial   : Schipplein-Andriacchi medial proxy in BW
-                         = alpha * |fy| + (mx * height_m) / d_m
+                         = alpha * |fy| + (mx_medial_sign * mx * height_m) / d_m
         """
         single = np.asarray(joint_angles).ndim == 1
         x = self._build_feature_windowed(
@@ -364,7 +391,8 @@ class JCFPostureSurrogate:
             "mx": out[:, 3],
             "fy_n": out[:, 1] * BW,
             "mx_nm": out[:, 3] * BW * height_m,
-            "f_medial": a * np.abs(out[:, 1]) + (out[:, 3] * height_m) / d,
+            "mx_medial": self.mx_medial_sign * out[:, 3],
+            "f_medial": a * np.abs(out[:, 1]) + (self.mx_medial_sign * out[:, 3] * height_m) / d,
         }
         if single:
             result = {k: float(v[0]) for k, v in result.items()}
@@ -435,7 +463,7 @@ if __name__ == "__main__":
     predictor = JCFPostureSurrogate(sys.argv[1])
     print(f"Loaded {predictor.input_set} checkpoint "
           f"(epoch={predictor.epoch+1}, val_loss={predictor.val_loss:.6f})")
-    print(f"Device: {predictor.device}, n_features={predictor.n_features}")
+    print(f"Device: {predictor.device}, n_features={predictor.n_features}, mx_medial_sign={predictor.mx_medial_sign:+g}")
 
     rng = np.random.default_rng(42)
     q = rng.normal(0, 0.3, N_JOINTS)

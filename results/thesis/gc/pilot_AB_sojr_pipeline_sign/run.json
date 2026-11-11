@@ -1,0 +1,112 @@
+{
+  "argv": [
+    "analysis/thesis/grand_challenge.py",
+    "--ckpt",
+    "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt",
+    "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_fmW0p5_e100_2.pt",
+    "--labels",
+    "fpopt",
+    "sept",
+    "--phi",
+    "0.4",
+    "0.5",
+    "0.6",
+    "--d-mm",
+    "40",
+    "45",
+    "50",
+    "--lag-sweep-ms",
+    "150",
+    "--mx-convention",
+    "pipeline",
+    "--name",
+    "pilot_AB_sojr_pipeline_sign"
+  ],
+  "args": {
+    "build_maps": false,
+    "ckpt": [
+      "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt",
+      "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_fmW0p5_e100_2.pt"
+    ],
+    "labels": [
+      "fpopt",
+      "sept"
+    ],
+    "subjects": [
+      "JW",
+      "DM",
+      "SC"
+    ],
+    "features": "deploy",
+    "grid": "jr",
+    "context": "ik",
+    "mx_convention": "pipeline",
+    "phi": [
+      0.4,
+      0.5,
+      0.6
+    ],
+    "d_mm": [
+      40.0,
+      45.0,
+      50.0
+    ],
+    "min_r": 0.98,
+    "min_sharpness": 5.0,
+    "min_cover": 0.9,
+    "edge_margin_pct": 3.0,
+    "dm_lag_ms": null,
+    "dm_lag_signal": "med",
+    "dm_lag_pooled": false,
+    "max_peak": 6.0,
+    "lag_sweep_ms": 150.0,
+    "lag_step_ms": 10.0,
+    "no_statop": false,
+    "max_segments": null,
+    "gc_root": "/home/gellert/Developer/medical_dt/jcf/external/grand_challenge",
+    "out_root": "/home/gellert/Developer/medical_dt/results/thesis/gc",
+    "name": "pilot_AB_sojr_pipeline_sign"
+  },
+  "dm_lag_ms_used": 95.0,
+  "peak_windows": [
+    [
+      "early",
+      5.0,
+      45.0
+    ],
+    [
+      "late",
+      55.0,
+      95.0
+    ]
+  ],
+  "checkpoints": [
+    {
+      "label": "fpopt",
+      "path": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt",
+      "name": "best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100",
+      "input_set": "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20",
+      "activity": "walking",
+      "fmedial_weight": 0.5,
+      "epoch": 30,
+      "git": "6687dc293dd10c4b2d76ee703c3ff7f55e549812",
+      "exclude": [
+        "han",
+        "fregly"
+      ],
+      "label_subdir": "jcf_output"
+    },
+    {
+      "label": "sept",
+      "path": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_fmW0p5_e100_2.pt",
+      "name": "best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_fmW0p5_e100_2",
+      "input_set": "qinst_notrans_pelvisrel_winpos_contact_w20",
+      "activity": "walking",
+      "fmedial_weight": 0.5,
+      "epoch": 32,
+      "git": null,
+      "exclude": null,
+      "label_subdir": "jcf_output"
+    }
+  ]
+}

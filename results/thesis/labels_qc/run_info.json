@@ -1,0 +1,322 @@
+{
+ "roots": [
+  "/home/gellert/Developer/medical_dt/jcf/full_duration/training/walking",
+  "/home/gellert/Developer/medical_dt/jcf/full_duration/training/static",
+  "/home/gellert/Developer/medical_dt/jcf/full_duration/testing/walking",
+  "/home/gellert/Developer/medical_dt/jcf/full_duration/testing/static",
+  "/home/gellert/Developer/medical_dt/jcf/external"
+ ],
+ "pattern": "*",
+ "n_folders": 9529,
+ "relabel_coverage": {
+  "total": {
+   "n_with_so": 9532,
+   "labelled": 9529,
+   "no setup": 2,
+   "failed": 1,
+   "labelled_frac": 0.9997,
+   "unlabelled_setup_resolves": 1,
+   "unlabelled_so_frames": 1291
+  },
+  "complete": false,
+  "by_lab": {
+   "carter": {
+    "n_with_so": 1392,
+    "labelled": 1392,
+    "labelled_frac": 1.0
+   },
+   "falisse": {
+    "n_with_so": 31,
+    "labelled": 31,
+    "labelled_frac": 1.0
+   },
+   "fregly": {
+    "n_with_so": 145,
+    "labelled": 145,
+    "labelled_frac": 1.0
+   },
+   "han": {
+    "n_with_so": 390,
+    "labelled": 390,
+    "labelled_frac": 1.0
+   },
+   "moore": {
+    "n_with_so": 6833,
+    "labelled": 6833,
+    "labelled_frac": 1.0
+   },
+   "tiziana": {
+    "n_with_so": 738,
+    "labelled": 738,
+    "labelled_frac": 1.0
+   },
+   "william": {
+    "n_with_so": 3,
+    "no setup": 2,
+    "failed": 1,
+    "labelled_frac": 0.0,
+    "unlabelled_setup_resolves": 1,
+    "unlabelled_so_frames": 1291
+   }
+  },
+  "by_group": {
+   "external/walking/william": {
+    "n_with_so": 3,
+    "no setup": 2,
+    "failed": 1,
+    "labelled_frac": 0.0,
+    "unlabelled_setup_resolves": 1,
+    "unlabelled_so_frames": 1291
+   },
+   "testing/static/han": {
+    "n_with_so": 19,
+    "labelled": 19,
+    "labelled_frac": 1.0
+   },
+   "testing/static/moore": {
+    "n_with_so": 6,
+    "labelled": 6,
+    "labelled_frac": 1.0
+   },
+   "testing/static/tiziana": {
+    "n_with_so": 11,
+    "labelled": 11,
+    "labelled_frac": 1.0
+   },
+   "testing/walking/carter": {
+    "n_with_so": 33,
+    "labelled": 33,
+    "labelled_frac": 1.0
+   },
+   "testing/walking/falisse": {
+    "n_with_so": 5,
+    "labelled": 5,
+    "labelled_frac": 1.0
+   },
+   "testing/walking/fregly": {
+    "n_with_so": 43,
+    "labelled": 43,
+    "labelled_frac": 1.0
+   },
+   "testing/walking/han": {
+    "n_with_so": 10,
+    "labelled": 10,
+    "labelled_frac": 1.0
+   },
+   "testing/walking/moore": {
+    "n_with_so": 566,
+    "labelled": 566,
+    "labelled_frac": 1.0
+   },
+   "testing/walking/tiziana": {
+    "n_with_so": 19,
+    "labelled": 19,
+    "labelled_frac": 1.0
+   },
+   "training/static/carter": {
+    "n_with_so": 159,
+    "labelled": 159,
+    "labelled_frac": 1.0
+   },
+   "training/static/fregly": {
+    "n_with_so": 4,
+    "labelled": 4,
+    "labelled_frac": 1.0
+   },
+   "training/static/han": {
+    "n_with_so": 108,
+    "labelled": 108,
+    "labelled_frac": 1.0
+   },
+   "training/static/moore": {
+    "n_with_so": 39,
+    "labelled": 39,
+    "labelled_frac": 1.0
+   },
+   "training/static/tiziana": {
+    "n_with_so": 165,
+    "labelled": 165,
+    "labelled_frac": 1.0
+   },
+   "training/walking/carter": {
+    "n_with_so": 1200,
+    "labelled": 1200,
+    "labelled_frac": 1.0
+   },
+   "training/walking/falisse": {
+    "n_with_so": 26,
+    "labelled": 26,
+    "labelled_frac": 1.0
+   },
+   "training/walking/fregly": {
+    "n_with_so": 98,
+    "labelled": 98,
+    "labelled_frac": 1.0
+   },
+   "training/walking/han": {
+    "n_with_so": 253,
+    "labelled": 253,
+    "labelled_frac": 1.0
+   },
+   "training/walking/moore": {
+    "n_with_so": 6222,
+    "labelled": 6222,
+    "labelled_frac": 1.0
+   },
+   "training/walking/tiziana": {
+    "n_with_so": 543,
+    "labelled": 543,
+    "labelled_frac": 1.0
+   }
+  }
+ },
+ "relabel_complete": false,
+ "relabel_process_running": false,
+ "relabel_summary": {
+  "path": "results/thesis/gc/knee_jr/relabel_all.csv",
+  "modified": "2026-11-10 15:03:06",
+  "n_rows": 12208,
+  "status_counts": {
+   "ok": 6238,
+   "exists": 3291,
+   "no SO output": 2678,
+   "no JR output": 1
+  },
+  "by_lab": {
+   "carter": {
+    "exists": 1392,
+    "no SO output": 1
+   },
+   "falisse": {
+    "ok": 26,
+    "no SO output": 9,
+    "exists": 5
+   },
+   "fregly": {
+    "ok": 97,
+    "no SO output": 55,
+    "exists": 48
+   },
+   "grand": {
+    "no SO output": 1
+   },
+   "han": {
+    "ok": 245,
+    "exists": 145
+   },
+   "moore": {
+    "ok": 5870,
+    "no SO output": 2387,
+    "exists": 963
+   },
+   "tiziana": {
+    "exists": 738,
+    "no SO output": 223
+   },
+   "william": {
+    "no SO output": 2,
+    "no JR output": 1
+   }
+  },
+  "failure_reasons": {}
+ },
+ "git": "36ae775",
+ "created": "2026-11-10 15:08:28",
+ "seconds": 53.6,
+ "n_rows": 9529,
+ "n_ok": 9528,
+ "status_counts": {
+  "ok": 9528,
+  "nonfinite labels": 1
+ },
+ "nonfinite_folders": {
+  "training/walking/tiziana_Subject12_t03": {
+   "sojr_r": 1,
+   "sojr_l": 1
+  }
+ },
+ "per_group": {
+  "testing/static/han": 19,
+  "testing/static/moore": 6,
+  "testing/static/tiziana": 11,
+  "testing/walking/carter": 33,
+  "testing/walking/falisse": 5,
+  "testing/walking/fregly": 43,
+  "testing/walking/han": 10,
+  "testing/walking/moore": 566,
+  "testing/walking/tiziana": 19,
+  "training/static/carter": 159,
+  "training/static/fregly": 4,
+  "training/static/han": 108,
+  "training/static/moore": 39,
+  "training/static/tiziana": 165,
+  "training/walking/carter": 1200,
+  "training/walking/falisse": 26,
+  "training/walking/fregly": 98,
+  "training/walking/han": 253,
+  "training/walking/moore": 6222,
+  "training/walking/tiziana": 542
+ },
+ "fregly_vs_measured": {
+  "source": "results/thesis/gc/pilot_AB_sojr/frames.csv.gz",
+  "by_subject": {
+   "DM": {
+    "n_segments": 24,
+    "n_frames": 878,
+    "n_filled": 878,
+    "fill_check_max_diff": 0.026871,
+    "n_full_stance_segments": 3,
+    "frame_pred_mean": 3.045,
+    "frame_meas_mean": 2.146,
+    "frame_bias": 0.899,
+    "frame_r": 0.406,
+    "segment_peak_pred_median": 4.907,
+    "segment_peak_meas_median": 2.747,
+    "early_windows": 3,
+    "early_peak_pred_median": 6.574,
+    "early_peak_meas_median": 3.131,
+    "late_windows": 7,
+    "late_peak_pred_median": 3.445,
+    "late_peak_meas_median": 2.378
+   },
+   "JW": {
+    "n_segments": 27,
+    "n_frames": 889,
+    "n_filled": 889,
+    "fill_check_max_diff": 0.026871,
+    "n_full_stance_segments": 1,
+    "frame_pred_mean": 3.064,
+    "frame_meas_mean": 1.815,
+    "frame_bias": 1.25,
+    "frame_r": 0.717,
+    "segment_peak_pred_median": 4.889,
+    "segment_peak_meas_median": 2.447,
+    "early_windows": 5,
+    "early_peak_pred_median": 4.909,
+    "early_peak_meas_median": 2.472,
+    "late_windows": 4,
+    "late_peak_pred_median": 5.744,
+    "late_peak_meas_median": 2.467
+   },
+   "SC": {
+    "n_segments": 43,
+    "n_frames": 1244,
+    "n_filled": 0,
+    "fill_check_max_diff": 0.026871,
+    "n_full_stance_segments": 1,
+    "frame_pred_mean": 3.303,
+    "frame_meas_mean": 2.12,
+    "frame_bias": 1.183,
+    "frame_r": 0.679,
+    "segment_peak_pred_median": 5.87,
+    "segment_peak_meas_median": 2.537,
+    "early_windows": 4,
+    "early_peak_pred_median": 3.653,
+    "early_peak_meas_median": 2.579,
+    "late_windows": 4,
+    "late_peak_pred_median": 5.852,
+    "late_peak_meas_median": 2.58
+   }
+  }
+ }
+}

@@ -1,0 +1,62 @@
+% methods_def.tex -- Section III-C (sensitivity), III-D (corrected baseline), III-E (wearable).
+% Input on the last line of methods.tex. Labels: sec:sens, sec:corrected, sec:wearable.
+% Sources: S1 grid and limit (A1-1, A1-3); 1.3 cm pelvis lift, joints fixed (M36, PS6, PS7);
+%   foot points (M29); S3 deployment form 20 frames at 100 Hz (A3-34); reference motion 6.45 s at
+%   100 Hz (GT6); > 5 muscles saturated in 40.8 % of frames, borrowed scaled model (GT5, M47).
+%   Corrected baseline = user decision (a)/(b), 2026-11-10. Training set = train_mlp *_sojrqc input
+%   sets: keep_r of <trial>/jcf_output_sojr/label_mask.npz (fixed right-foot COP trials, then the six
+%   SO/dynamics frame rules; the 5 BW flag is stored, NOT applied), carried to the 100 Hz grid with
+%   LABEL_MASK_TOL = 0.05, physical M_x sign (MX_SIGN_PHYSICAL). 25.4 % = kept_stance_frac_r of the
+%   training walking pool in results/thesis/labels_qc/label_masks/by_lab.csv (adding the 5 BW flag
+%   would remove another 2.5 % of the kept stance time, fy5_after_so_frac_of_kept_stance_r). The
+%   legacy trial filters (6 BW, 0.15 BW*H) would drop 86 % of the kept training frames
+%   (label_masks/dry_build_fpopt/trial_filters.csv), so the corrected runs switch them off
+%   (--max-peak 1e9 --max-moment 1e9); keep in sync with the training commands.
+%   S2 pelvis lift: the numbers are [4]'s own (paper/author.tex, "lifting the pelvis by 1.3 cm with
+%   the stance foot planted"), cited as such in results.tex; we repeat the test on the corrected
+%   baseline only.
+%   Wearable: A3-01..A3-03, A3-05, A3-22..A3-25, A3-29..A3-34, A3-39, A3-41, A3-07, A3-08;
+%   Wang et al. data: results/thesis/twente/EXPLORE_NOTES.md sections 1-6 (9 people, 54 treadmill
+%   trials at 0.25-1.50 m/s, 8 sensors, optical IK, treadmill force, separate static pose, no
+%   knee-load labels).
+\subsection{Sensitivity Protocol}\label{sec:sens}
+\textit{S1, constants.} We recompute $\Fmed$ for $\phi \in \{0.4, 0.5, 0.6\}$ and
+$d \in \{40, 45, 50\}$~mm, with the limit at 1.4~BW, and report the mean absolute error (MAE) and
+the recall and precision of limit crossings. \textit{S2, inputs.} We lift the pelvis
+by 1.3~cm with the stance foot planted, as \Chong{}~\citeChong{} did, and swap the foot points.
+\textit{S3, alignment.} Models are scored on training-style and on aligned 100~Hz inputs, as the
+optimizer and the IMU driver supply. \textit{S4, training run.} Models that differ only in the
+seed are scored on the test split and on the optimizer's reference
+motion~\citeChong{} (6.45~s), labelled with SO+JR. Its labels are indicative: the
+motion is far out of distribution, uses a borrowed scaled model, and has more than five muscles
+saturated in 40.8\% of its frames.
+
+\subsection{Corrected Baseline}\label{sec:corrected}
+The corrected baseline keeps the legacy architecture and recipe but (i)~uses SO+JR labels,
+(ii)~uses the physical sign in the $\Fmed$ loss and stores the convention in the checkpoint,
+(iii)~builds inputs and labels on the exact JR time grid resampled to 100~Hz, so a window spans
+200~ms as in deployment, and (iv)~trains only on frames that pass the quality rules: fixed-COP
+trials are dropped, then frames that an SO or dynamics rule flags, which keeps 25.4\% of the
+pool's right-knee stance time (a 100~Hz frame passes when at most 5\% of its interpolated label
+comes from flagged frames); they replace the legacy trial filters on peak force and moment. Three seeds use the optimizer's foot
+point and one run the calcaneus origin. Legacy checkpoints keep their original formula, so that
+earlier optimizer results stay reproducible.
+
+\subsection{Wearable Path}\label{sec:wearable}
+A Perception Neuron~3 suit streams fused orientations of 8 sensors (pelvis, torso, thighs,
+shanks, feet) at 60~Hz, but no pelvis position. After a 1-s standing calibration, an unscented
+Kalman filter (UKF)~\cite{julier2004unscented} with $2\times38$ cubature
+points~\cite{arasaratnam2009cubature} estimates 19 coordinates of a height-scaled Rajagopal model
+and their velocities from orientation residuals ($\sigma = 2^\circ$), and legged
+odometry~\cite{bloesch2012state} holds each planted foot ($\sigma = 1.5$~cm). Hysteresis detectors
+on foot angular speed~\cite{skog2010zero} set the contact flags. They switch on at foot flat,
+about 90~ms after heel strike, so each onset is back-dated by up to 0.2~s to the speed minimum
+at initial contact. A 20-frame, 100~Hz window feeds the surrogate, so predictions lag by 90~ms;
+estimates and loads go over Redis to a robotics visualizer for display.
+
+We test the path on a simulated suit (body orientations from held-out kinematics with
+autoregressive noise of 0--2$^\circ$ and heading drift) and on the real Xsens recordings of Wang
+et al.~\cite{wang2023twente}: 9 people, 54 treadmill trials at 0.25--1.50~m/s, 8 sensors on the
+same bodies as the suit, with optical motion capture and treadmill force. Calibration uses a
+separate static pose. As the data have no knee-load labels, the IMU path is scored against
+optical inverse kinematics (IK) and against the same surrogate run on optical kinematics.

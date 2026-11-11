@@ -1,0 +1,22 @@
+{
+ "command": "python -I analysis/thesis/so_label_qc.py masks --workers 20",
+ "n_folders": 9530,
+ "n_written": 9530,
+ "n_errors": 0,
+ "runtime_s": 33.8,
+ "workers": 20,
+ "mask_file": "label_mask.npz",
+ "rules": [
+  "sat_knee",
+  "sat_leg3",
+  "res_leg",
+  "pelvis_m",
+  "jump",
+  "coact"
+ ],
+ "value_rules": [
+  "fy5"
+ ],
+ "version": 1,
+ "errors": []
+}

@@ -1,0 +1,31 @@
+% abstract.tex -- about 185 words. Audit numbers are final; surrogate results are \pend.
+% Sources: bias -0.63..-0.87 BW = stored labels vs implant medial force, physical sign
+%   (results/thesis/gc/pilot_AB_sojr/README.md, DM -0.627, JW -0.871); two surrogates (fpopt, sept,
+%   trained with the recipe [4] describes) r < 0 under the physical sign, plausible under the inverted
+%   one (same README; mx_sign/README.md section 5); 9,529 folders relabelled; 2.4-2.5x the in vivo
+%   walking peak in moving-COP trials (qc_final.md fix:so-diagnosis "Literature"); 36 of 40
+%   hand-picked peaks (fix:so-diagnosis sample); residual over-read on SC frames passing the rules
+%   (checks/sc_qc_overread.csv, qc_pass: total +0.88 BW, medial +0.28 BW); 25.4 % of right-knee
+%   pool stance time kept by the training mask keep_r, no 5 BW cap
+%   (results/thesis/labels_qc/label_masks/by_lab.csv, training walking pool); +-0.3 s warp (facts X01).
+\begin{abstract}
+A gait optimizer for knee osteoarthritis keeps a medial pain-risk proxy below a limit using a
+neural surrogate of musculoskeletal simulation. Such a model acts on people and must be
+trustworthy. We audited a recently proposed surrogate pipeline against static
+optimization with joint reaction analysis (SO+JR) and in vivo forces from three instrumented
+knees, and found four defects. The stored labels lacked the muscle forces and under-read implant
+medial force (bias $-0.63$ to $-0.87$ body weights, BW). The adduction-moment sign was inverted;
+two surrogates trained with the pipeline's recipe looked plausible only under it, and under the
+correct sign anti-correlate with implant medial force. Recomputed SO+JR labels exceed in vivo
+walking peaks 2.4- to 2.5-fold even with a moving centre of pressure. Fixed centres of pressure,
+unconverged optimization and dynamic inconsistency explain 36 of 40 hand-picked peaks above
+4~BW, but labels that pass our quality rules (25.4\% of stance time) still over-read the implants.
+Input windows were time-warped by up to 0.3~s. We also quantify sensitivity to proxy constants,
+inputs and training seed, and test a corrected baseline and a wearable path on real
+sensors\pend{ (pending)}.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Knee osteoarthritis, musculoskeletal simulation, surrogate model, validation, sensitivity
+analysis, wearable sensors
+\end{IEEEkeywords}

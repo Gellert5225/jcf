@@ -1,0 +1,9 @@
+{
+  "run": "results/thesis/gc/pilot_AB_sojr",
+  "mx_convention": "physical",
+  "phi": 0.5,
+  "d_mm": 45.0,
+  "bin_pct": 5.0,
+  "min_frames": 10,
+  "min_depth": 0.05
+}

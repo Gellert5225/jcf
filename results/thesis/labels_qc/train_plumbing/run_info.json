@@ -1,0 +1,30 @@
+{
+ "created": "2026-11-10T15:03:56",
+ "git": "36ae775",
+ "scope": {
+  "split": [
+   "training",
+   "testing"
+  ],
+  "activity": [
+   "walking",
+   "static"
+  ],
+  "exclude": [],
+  "labs": null
+ },
+ "n_folders": 9529,
+ "ready": true,
+ "n_not_ready": 0,
+ "nonfinite_sojr": [
+  "training/walking/tiziana_Subject12_t03"
+ ],
+ "flat_cv": 0.25,
+ "flat_dr": 0.3,
+ "max_peak": 6.0,
+ "max_moment": 0.15,
+ "summaries": [
+  "results/thesis/gc/knee_jr/relabel_all.csv"
+ ],
+ "seconds": 15.8
+}

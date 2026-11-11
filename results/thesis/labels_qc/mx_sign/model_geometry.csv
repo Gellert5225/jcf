@@ -1,0 +1,13 @@
+lab,folder,side,n_medial,n_lateral,z_medial_m,z_lateral_m,medial_all_one_side,lateral_all_one_side,implied_medial_sign,physical_sign,pipeline_sign
+carter,carter_P010_split0_t00,l,9,3,0.02416575106147884,-0.03540148995642,True,True,1.0,1.0,-1.0
+carter,carter_P010_split0_t00,r,9,3,-0.02416575106147884,0.03540148995642,True,True,-1.0,-1.0,1.0
+falisse,falisse_subject_3_t00,l,9,3,0.02387032535685622,-0.03044013865788,True,True,1.0,1.0,-1.0
+falisse,falisse_subject_3_t00,r,9,3,-0.02387032535685622,0.03044013865788,True,True,-1.0,-1.0,1.0
+fregly,fregly_3GC_t00_r00,l,9,3,0.023697503118619484,-0.03293932178061,True,True,1.0,1.0,-1.0
+fregly,fregly_3GC_t00_r00,r,9,3,-0.023697503118619484,0.03293932178061,True,True,-1.0,-1.0,1.0
+han,han_s003_split1_t03,l,9,3,0.018537733439760003,-0.028758052975084675,True,True,1.0,1.0,-1.0
+han,han_s003_split1_t03,r,9,3,-0.018537733439760003,0.028758052975084675,True,True,-1.0,-1.0,1.0
+moore,moore_subject10_t01_r01,l,9,3,0.022106863459913622,-0.03395465835316,True,True,1.0,1.0,-1.0
+moore,moore_subject10_t01_r01,r,9,3,-0.022106863459913622,0.03395465835316,True,True,-1.0,-1.0,1.0
+tiziana,tiziana_Subject10_t00,l,9,3,0.017591687374708266,-0.026513133458280002,True,True,1.0,1.0,-1.0
+tiziana,tiziana_Subject10_t00,r,9,3,-0.017591687374708266,0.026513133458280002,True,True,-1.0,-1.0,1.0

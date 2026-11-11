@@ -58,13 +58,17 @@ DEAD_JOINT_COLS = [11, 12, 18, 19]  # subtalar_angle_r, mtp_angle_r, subtalar_an
 # ─── Data Quality Filter ──────────────────────────────────────────────────────
 
 def filter_flat_subjects(subject_dirs, cv_threshold=0.25, dr_threshold=0.3,
-                         jcf_subdir='jcf_output'):
+                         jcf_subdir='jcf_output', nonfinite=None):
     """
     Remove subjects whose JCF resultant waveform is flat (no cyclic peaks).
     A subject is 'flat' if its coefficient of variation < cv_threshold
     OR its dynamic range < dr_threshold (in BW).
 
-    Returns (kept_dirs, n_removed).
+    A subject whose label file holds a non-finite value (NaN/inf, or text that is not a number) is removed as well:
+    it cannot be judged, and NaN comparisons are all False, so the flat test would keep it. Such folders are also
+    appended to the list `nonfinite` when one is given, so callers can report them apart from the flat ones.
+
+    Returns (kept_dirs, n_removed); n_removed counts the flat and the non-finite subjects.
     """
     kept = []
     removed = 0
@@ -79,6 +83,11 @@ def filter_flat_subjects(subject_dirs, cv_threshold=0.25, dr_threshold=0.3,
             mass = json.load(f)['mass_kg']
         BW = mass * 9.81
         jcf = load_sto(jcf_path)
+        if nonfinite_rows(jcf):
+            removed += 1
+            if nonfinite is not None:
+                nonfinite.append(subj_dir)
+            continue
         fx = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fx'].values
         fy = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fy'].values
         fz = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fz'].values
@@ -165,9 +174,43 @@ def load_mot(path, skiprows=6):
     return pd.read_csv(path, sep='\t', skiprows=skiprows)
 
 
+def numeric_table(df):
+    """Every column of an OpenSim table as float. OpenSim pads values to a fixed width, so a failed frame is written
+    as '            -nan', which pandas leaves as text (the whole column then becomes strings). Text is stripped and
+    parsed; anything that is still not a number becomes NaN, which nonfinite_rows() then reports."""
+    for c in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[c]):
+            df[c] = pd.to_numeric(df[c].astype(str).str.strip(), errors='coerce')
+    return df
+
+
+def nonfinite_rows(df):
+    """Number of rows of a numeric_table() with a NaN or inf in any column."""
+    return int((~np.isfinite(df.to_numpy(dtype=np.float64))).any(axis=1).sum())
+
+
 def load_sto(path, skiprows=11):
-    """Load an OpenSim .sto file."""
-    return pd.read_csv(path, sep='\t', skiprows=skiprows)
+    """Load an OpenSim .sto file. All columns are float; values that are not numbers (e.g. a padded '-nan') are NaN."""
+    return numeric_table(pd.read_csv(path, sep='\t', skiprows=skiprows, skipinitialspace=True))
+
+
+JR_LABEL_FILES = ('BatchJCF_JointReaction_ReactionLoads.sto',      # batch pipeline and the SO+JR relabel
+                  'FullDuration_JointReaction_ReactionLoads.sto')  # an AnalyzeTool named FullDuration (jcf/external/
+                                                                    # william_2026-09-23/jcf_output_sojr/)
+
+
+def jr_label_path(subject_dir, jcf_subdir='jcf_output'):
+    """The JointReaction label file of a trial folder: <jcf_subdir>/BatchJCF_JointReaction_ReactionLoads.sto, or the
+    FullDuration_ name when only that exists. Returns the BatchJCF_ path when neither exists."""
+    paths = [os.path.join(subject_dir, jcf_subdir, f) for f in JR_LABEL_FILES]
+    return next((p for p in paths if os.path.exists(p)), paths[0])
+
+
+def label_nonfinite_rows(subject_dir, jcf_subdir='jcf_output'):
+    """Rows with a non-finite value in <subject_dir>/<jcf_subdir>/BatchJCF_JointReaction_ReactionLoads.sto
+    (jr_label_path; 0 when the file is missing; load_subject rejects a trial with any)."""
+    path = jr_label_path(subject_dir, jcf_subdir)
+    return nonfinite_rows(load_sto(path)) if os.path.exists(path) else 0
 
 
 def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
@@ -190,8 +233,7 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
     """
     ik_path = os.path.join(subject_dir, 'ik_results.mot')
     grf_path = os.path.join(subject_dir, 'grf_data.mot')
-    jcf_path = os.path.join(subject_dir, jcf_subdir,
-                            'BatchJCF_JointReaction_ReactionLoads.sto')
+    jcf_path = jr_label_path(subject_dir, jcf_subdir)
     meta_path = os.path.join(subject_dir, 'metadata.json')
 
     if not all(os.path.exists(p) for p in [ik_path, grf_path, jcf_path, meta_path]):
@@ -216,8 +258,11 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
     grf_time = grf['time'].values
     grf_data = grf[force_cols].values / BW  # normalize by BW
 
-    # Load JCF labels
+    # Load JCF labels. A file with any non-finite value (a frame where JointReaction failed) is rejected before the
+    # peak and moment tests, which would otherwise compare against NaN (always False) and keep the trial.
     jcf = load_sto(jcf_path)
+    if nonfinite_rows(jcf):
+        return None
     jcf_time = jcf['time'].values
     fx = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fx'].values
     fy = jcf['walker_knee_r_on_tibia_r_in_tibia_r_fy'].values
@@ -233,10 +278,10 @@ def load_subject(subject_dir, lower_body_only=False, with_confidence=False,
         if height_m is None or height_m <= 0:
             return None
         # OpenSim's JointReaction (apply_on_bodies=child, express_in_frame=child)
-        # for the Rajagopal walker_knee_r returns Mx in the tibia frame with the
-        # convention that Mx > 0 corresponds to medial-compartment loading during
-        # right-leg stance — i.e., it already matches the Schipplein-Andriacchi
-        # M_add. No sign flip is needed.
+        # for the Rajagopal walker_knee_r returns Mx in the tibia frame. The label is
+        # this raw mx. Its medial-positive (adduction) moment is -mx at walker_knee_r
+        # (+mx at walker_knee_l): analysis/thesis/knee_mx_sign.py. F_medial code applies
+        # the sign (train_mlp.MX_SIGN_PHYSICAL, cfg mx_medial_sign); the label is not flipped.
         mx = jcf['walker_knee_r_on_tibia_r_in_tibia_r_mx'].values
         mx_norm = mx / (BW * height_m)
         # Reject SO-corrupted moments (healthy walking |Mx_norm| < ~0.05; 0.15 = 3× max)

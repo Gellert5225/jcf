@@ -1,0 +1,54 @@
+% discussion.tex -- Sections V and VI. Sources as in results.tex. Facts about Chong et al.:
+% the published text describes SO+JR labels and states that M_add > 0 loads the medial
+% compartment (paper/author.tex lines 537, 554); its reductions were not checked with SO+JR
+% (ISRR2). Kaneda 0.28 BW = our recomputation on SC (gc/pilot_AB_sojr/README.md); "5 of 94
+% segments cover a full stance" (qc_final.md fix:label-qc open issues).
+% "Cannot confirm or refute" rests on D1 and D2, which hold for every checkpoint trained on the stored
+% labels and for every optimizer run that forms the proxy with +M_x at the right knee, NOT on the in
+% vivo r of the two audited checkpoints: which checkpoint produced the figures of [4] is unconfirmed
+% (facts ISRR4; TODO before submission: confirm with the first author). SC residual over-read:
+% checks/sc_qc_overread.csv; 25.4 %: labels_qc/label_masks/by_lab.csv (see results.tex).
+\section{Discussion}\label{sec:discussion}
+\textit{What the audit means for the optimizer.} \Chong{}~\citeChong{} describe SO+JR labels
+and a medial-positive moment, but the stored labels lack the SO muscle forces (D1) and the
+inference code uses the inverted sign (D2). D1 affects every checkpoint trained on the stored
+labels and D2 every optimizer run with this proxy, whichever checkpoint it queried; held-out
+accuracy hid both, because training and test labels share them. The reported load reductions are
+surrogate predictions not checked with SO+JR, so this audit can neither confirm nor refute them,
+and the in vivo scores of the two audited checkpoints need not carry over to others. The
+synthesized gaits may still unload the knee; SO+JR with quality-checked labels on them would
+settle it.
+
+\textit{Neither label source is ground truth.} The stored labels are too low and the SO+JR
+labels too high. The quality rules remove the worst of D3 but keep only 25.4\% of stance time and
+little of Carter or Tiziana, and SC frames that pass them are still over-read
+(Sec.~\ref{sec:res-d3}). On SC, Kaneda et al.'s SO+JR, with
+separate medial and lateral contacts, reached an MAE of 0.28~BW against the implant, so SO+JR can
+do much better than our labels; their contact model is one candidate for the difference.
+Re-solving SO per frame and repairing the COP would keep more data.
+
+\textit{Recommendations.} For learned models that act on people: (i)~check that the physics ran
+as described (D1); (ii)~test sign conventions on a case with a known answer (D2); (iii)~compare
+label magnitudes with in vivo data (D3); (iv)~build features with the deployment code (D4);
+(v)~report seed spread, and verify optimized motions with physics before they reach a patient.
+
+\textit{Social impact.} Gait retraining has lowered KAM and pain~\cite{shull2013six}, and a
+wearable surrogate could take pain-aware coaching out of the lab. The main risk is false
+reassurance: a model that under-reads medial load certifies a harmful gait as safe, while one
+trained on inflated labels steers patients toward needless changes. None of the four defects
+showed in held-out testing; physics, implants and the deployment code exposed them. $\Fmed$
+remains a proxy, and medial load is not pain, so use with patients also requires clinical
+validation.
+
+\textit{Limitations.} The in vivo subjects are three knee-replacement patients, not OA knees; most
+segments cover only half a stance, and DM's timing is uncertain. Our SO+JR uses a single knee
+contact. The 40 peaks were hand-picked, so their causes are not prevalences. The optimizer was not
+available, its reference motion is one trajectory labelled with a borrowed scaled model, and the
+real-sensor data have no knee-load labels.
+
+\section{Conclusion}\label{sec:conclusion}
+A learned pain-risk surrogate inherits the defects of its label pipeline and input construction,
+and held-out accuracy hides those that the test data share. Auditing one such pipeline against
+physics, instrumented knees and its own code found four defects that held-out testing had
+missed. Until the corrected baseline\pend{ (pending)} is validated in the same way, a load
+reduction found by optimizing the surrogate is a hypothesis to verify with physics.

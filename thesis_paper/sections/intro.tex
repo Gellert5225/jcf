@@ -1,0 +1,47 @@
+% intro.tex -- Section I. Sources: 1.4 BW limit (facts ISRR8); SO+JR minutes per trial (M44);
+% locked knee 1.7 vs 21.7 deg within stance, 12 people (GT7: kinematics only, label-independent);
+% D1-D4 = qc_final.md findings; the optimizer code is not available (PAPER_SPEC).
+\section{Introduction}\label{sec:intro}
+
+Knee osteoarthritis (OA) causes chronic pain. A high knee adduction moment (KAM) predicted
+progression of medial knee OA~\cite{miyazaki2002}, and six weeks of gait retraining lowered both
+KAM and pain~\cite{shull2013six}, although a lower KAM does not guarantee a lower medial contact
+force in vivo~\cite{walter2010}.
+
+\Chong{}~\citeChong{} synthesize antalgic (pain-avoiding) gait. They reshape a
+reference walk so that a medial pain-risk proxy $\Fmed$, built from the compressive
+tibiofemoral force and the adduction moment~\cite{schipplein1991}, stays below 1.4 body weights
+(BW). OpenSim~\cite{delp2007} static optimization (SO) followed by joint reaction analysis (JR),
+SO+JR, takes minutes per trial, so a neural surrogate trained on labels of AddBiomechanics
+trials~\cite{werling2024} from this pipeline predicts $\Fmed$ inside the optimizer
+(Fig.~\ref{fig:overview}). Fed
+by wearable sensors, such a surrogate could also monitor knee load outside the lab, as wearable
+models already do for the KAM~\cite{wang2020kam}.
+
+This model acts on people. An optimizer drives a learned objective toward inputs where its
+predictions are falsely optimistic~\cite{trabucco2021}, and the optimizer's reference motion lies
+far from the training data: within stance its right knee moves through 1.7$^\circ$, against
+21.7$^\circ$ in recorded gait of 12 people. The synthesized gait may reach a patient through
+coaching or an assistive device, and a model that reads a harmful gait as safe falsely reassures
+patient and clinician. Held-out accuracy cannot expose a defect that training and test labels
+share, so credible use needs validation against measurement and sensitivity
+analysis~\cite{hicks2015}.
+
+We therefore audited the surrogate pipeline of \Chong{} layer by layer (labels, proxy,
+inputs, training) against SO+JR and against in vivo forces from instrumented knee
+implants~\cite{fregly2012}. The optimizer was not available, so sensitivity is measured at the
+surrogate level and on the optimizer's reference motion. Our contributions are:
+\begin{itemize}
+\item A pipeline audit with in vivo checks that found and quantified four defects: joint
+  reaction without the SO muscle forces (D1), an inverted adduction-moment sign (D2), SO label
+  defects from fixed centres of pressure, unconverged SO and dynamic inconsistency (D3), and
+  time-warped, native-rate input windows (D4).
+\item A sensitivity analysis of the proxy constants and limit (S1), the pelvis and foot-point
+  inputs (S2), feature alignment (S3) and the training seed on the optimizer's locked-knee
+  reference motion (S4).
+\item A corrected baseline trained only on SO+JR labels that pass our quality rules, with the
+  physical moment sign and aligned features\pend{ (results pending)}.
+\item A wearable path from inertial measurement units (IMUs) to $\Fmed$, checked on a simulated
+  suit and on real Xsens recordings with an optical reference~\cite{wang2023twente}\pend{
+  (pending)}.
+\end{itemize}

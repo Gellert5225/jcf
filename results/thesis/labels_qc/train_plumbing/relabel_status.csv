@@ -1,0 +1,19 @@
+summary,lab,status,n
+results/thesis/gc/knee_jr/relabel_all.csv,carter,exists,1392
+results/thesis/gc/knee_jr/relabel_all.csv,carter,no SO output,1
+results/thesis/gc/knee_jr/relabel_all.csv,falisse,exists,5
+results/thesis/gc/knee_jr/relabel_all.csv,falisse,no SO output,9
+results/thesis/gc/knee_jr/relabel_all.csv,falisse,ok,26
+results/thesis/gc/knee_jr/relabel_all.csv,fregly,exists,48
+results/thesis/gc/knee_jr/relabel_all.csv,fregly,no SO output,55
+results/thesis/gc/knee_jr/relabel_all.csv,fregly,ok,97
+results/thesis/gc/knee_jr/relabel_all.csv,grand,no SO output,1
+results/thesis/gc/knee_jr/relabel_all.csv,han,exists,145
+results/thesis/gc/knee_jr/relabel_all.csv,han,ok,245
+results/thesis/gc/knee_jr/relabel_all.csv,moore,exists,963
+results/thesis/gc/knee_jr/relabel_all.csv,moore,no SO output,2387
+results/thesis/gc/knee_jr/relabel_all.csv,moore,ok,5870
+results/thesis/gc/knee_jr/relabel_all.csv,tiziana,exists,738
+results/thesis/gc/knee_jr/relabel_all.csv,tiziana,no SO output,223
+results/thesis/gc/knee_jr/relabel_all.csv,william,no JR output,1
+results/thesis/gc/knee_jr/relabel_all.csv,william,no SO output,2

@@ -3,6 +3,8 @@
     conda run -n jcf python -m imu.validate_synthetic \
         --trial jcf/full_duration/testing/walking/carter_P010_split0_t10 \
         --out results/imu/val_P010_t10 --t0 2 --t1 6 --fs 100 --noise-deg 1 --drift-deg-per-s 0.5
+    # a *_sojrqc checkpoint against the SO+JR labels (physical M_x sign is the default --mx-convention):
+    conda run -n jcf python -m imu.validate_synthetic --trial ... --out ... --ckpt <qc>.pt --label-subdir jcf_output_sojr
 
 Steps:
 1. virtual IMUs from the trial's mocap IK (synthetic.py), with optional noise and heading drift
@@ -17,6 +19,12 @@ Steps:
 
 Only checkpoints without pelvis-translation inputs are valid for the IMU path, because orientation sensors do
 not observe where the pelvis is; others are scored on the mocap path only.
+
+F_medial = 0.5*|F_y| + s*M_x*H/0.045 (BW), with one sign s for the labels and every surrogate (--mx-convention):
+physical (default) takes the medial moment as -mx of walker_knee_r (analysis/thesis/knee_mx_sign.py), pipeline as +mx
+(the pre-Nov-2026 numbers). The surrogate side is formed from each checkpoint's raw fy and mx, never from its own
+f_medial, which follows the sign stored in the checkpoint (mx_medial_sign: +1 legacy, -1 for *_sojrqc). Labels come
+from <trial>/<--label-subdir>/ (jcf_output = stored, jcf_output_sojr = SO+JR; the FullDuration_ file name is accepted).
 
 Outputs in --out: summary.json, angles_rmse.csv, fmedial.csv, fmedial.png, plus the synthetic and IK files.
 """
@@ -43,6 +51,32 @@ DEFAULT_CKPTS = [
 ]
 PRE = "walker_knee_r_on_tibia_r_in_tibia_r_"
 D_M, PHI = 0.045, 0.5
+MX_SIGN = {"physical": -1.0, "pipeline": 1.0}   # factor on the raw walker_knee_r mx (= train_mlp.MX_CONVENTIONS)
+LABEL_FILES = ("BatchJCF_JointReaction_ReactionLoads.sto",       # = train_cnn.JR_LABEL_FILES
+               "FullDuration_JointReaction_ReactionLoads.sto")
+
+
+def fmedial_bw(fy_bw, mx_bwh, height_m, sign):
+    """F_medial (BW) from F_y (BW) and the raw walker_knee_r mx (BW*H) with medial sign `sign` (MX_SIGN)."""
+    return PHI * np.abs(np.asarray(fy_bw, float)) + sign * np.asarray(mx_bwh, float) * height_m / D_M
+
+
+def label_file(trial, subdir):
+    """<trial>/<subdir>/BatchJCF_JointReaction_ReactionLoads.sto, or the FullDuration_ name when only that exists."""
+    for name in LABEL_FILES:
+        p = os.path.join(trial, subdir, name)
+        if os.path.exists(p):
+            return p
+    raise SystemExit(f"no JointReaction labels in {os.path.join(trial, subdir)}")
+
+
+def label_fmedial(jt, jn, jv, t, bw, height, sign):
+    """Right-knee labels (read_mot table, N and N*m) at times t: (F_medial BW, F_y BW, mx BW*H); NaN outside the file."""
+    fy = np.interp(t, jt, jv[:, jn.index(PRE + "fy")]) / bw
+    mx = np.interp(t, jt, jv[:, jn.index(PRE + "mx")]) / (bw * height)
+    fm = fmedial_bw(fy, mx, height, sign)
+    fm[(np.asarray(t) < jt[0]) | (np.asarray(t) > jt[-1])] = np.nan
+    return fm, fy, mx
 
 
 def fk_positions(model_path, names, values):
@@ -67,8 +101,9 @@ def fk_positions(model_path, names, values):
     return out
 
 
-def surrogate_fmedial(model, q16, pos, rc, lc, mass, height):
-    """Windowed surrogate prediction; returns (centre-frame indices, F_medial, Fy, Mx)."""
+def surrogate_fmedial(model, q16, pos, rc, lc, mass, height, sign):
+    """Windowed surrogate prediction; returns (centre-frame indices, F_medial, Fy, Mx). F_medial is formed from the raw
+    fy and mx with medial sign `sign`, not taken from the checkpoint's own f_medial (its stored mx_medial_sign)."""
     W = 20
     n = len(q16) - W + 1
     c = W // 2
@@ -78,7 +113,8 @@ def surrogate_fmedial(model, q16, pos, rc, lc, mass, height):
     p = model.predict_windowed(joint_angles=q16[c:c + n], com_rel_window=win(pos["com"] - pel),
                                calcn_r_rel_window=win(pos["calcn_r"] - pel), calcn_l_rel_window=win(pos["calcn_l"] - pel),
                                mass_kg=mass, height_m=height, **kw)     # pelvis_tx/ty/tz centred over the clip
-    return np.arange(c, c + n), np.asarray(p["f_medial"]), np.asarray(p["fy"]), np.asarray(p["mx"])
+    fy, mx = np.asarray(p["fy"]), np.asarray(p["mx"])
+    return np.arange(c, c + n), fmedial_bw(fy, mx, height, sign), fy, mx
 
 
 def err(a, b):
@@ -103,7 +139,12 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--ckpt", nargs="+", default=None)
     ap.add_argument("--contact-thresh-deg-s", type=float, default=150.0)
+    ap.add_argument("--label-subdir", default="jcf_output",
+                    help="label folder inside --trial: jcf_output (stored) or jcf_output_sojr (SO+JR)")
+    ap.add_argument("--mx-convention", choices=sorted(MX_SIGN), default="physical",
+                    help="medial moment for labels and surrogates alike: physical = -mx (default), pipeline = +mx")
     a = ap.parse_args(argv)
+    sign = MX_SIGN[a.mx_convention]
     os.makedirs(a.out, exist_ok=True)
     trial = a.trial.rstrip("/")
     meta_trial = json.load(open(os.path.join(trial, "metadata.json")))
@@ -159,11 +200,9 @@ def main(argv=None):
     }
 
     # 5: surrogate
-    jt, jn, jv = read_mot(os.path.join(trial, "jcf_output", "BatchJCF_JointReaction_ReactionLoads.sto"), angles=False)
-    fy_gt = np.interp(t_orig, jt, jv[:, jn.index(PRE + "fy")]) / BW
-    mx_gt = np.interp(t_orig, jt, jv[:, jn.index(PRE + "mx")]) / (BW * height)
-    fm_gt = PHI * np.abs(fy_gt) + mx_gt * height / D_M
-    fm_gt[(t_orig < jt[0]) | (t_orig > jt[-1])] = np.nan
+    label_path = label_file(trial, a.label_subdir)
+    jt, jn, jv = read_mot(label_path, angles=False)
+    fm_gt, _, _ = label_fmedial(jt, jn, jv, t_orig, BW, height, sign)
     q_true = np.column_stack([true_col(n) for n in JOINT_ORDER])
     q_imu = np.column_stack([imu_col(n) for n in JOINT_ORDER])
     ckpts = a.ckpt or [p for p in (os.path.join(REPO, c) for c in DEFAULT_CKPTS) if os.path.exists(p)]
@@ -173,13 +212,14 @@ def main(argv=None):
     for ck in ckpts:
         m = JCFPostureSurrogate(ck)
         name = os.path.splitext(os.path.basename(ck))[0]
-        idx, f_ref, _, _ = surrogate_fmedial(m, q_true, pos_true, rc_grf, lc_grf, mass, height)
+        idx, f_ref, _, _ = surrogate_fmedial(m, q_true, pos_true, rc_grf, lc_grf, mass, height, sign)
         res = {"pelvis_translation_input": not m.drop_pelvis_translation,
+               "checkpoint_mx_medial_sign": float(getattr(m, "mx_medial_sign", 1.0)),
                "mocap+grf_vs_opensim": err(f_ref, fm_gt[idx]), "mocap+grf_vs_opensim_stance": err(f_ref[stance[idx]], fm_gt[idx][stance[idx]])}
         curves.loc[idx, f"{name}|mocap+grf"] = f_ref
         if m.drop_pelvis_translation:
             for tag, (rc, lc) in {"imu+grf": (rc_grf, lc_grf), "imu+imu_contact": (rc_imu, lc_imu)}.items():
-                _, f_imu, _, _ = surrogate_fmedial(m, q_imu, pos_imu, rc, lc, mass, height)
+                _, f_imu, _, _ = surrogate_fmedial(m, q_imu, pos_imu, rc, lc, mass, height, sign)
                 curves.loc[idx, f"{name}|{tag}"] = f_imu
                 res[f"{tag}_vs_mocap+grf"] = err(f_imu, f_ref)
                 res[f"{tag}_vs_opensim"] = err(f_imu, fm_gt[idx])
@@ -190,7 +230,8 @@ def main(argv=None):
     curves.to_csv(os.path.join(a.out, "fmedial.csv"), index=False)
 
     used = ang[ang.observed & ang.surrogate_input]
-    summary = dict(trial=trial, synthetic=syn, angles_rmse_deg=dict(zip(used.coordinate, used.rmse.round(3))),
+    summary = dict(trial=trial, labels=os.path.relpath(label_path, trial), mx_convention=a.mx_convention,
+                   synthetic=syn, angles_rmse_deg=dict(zip(used.coordinate, used.rmse.round(3))),
                    angles_rmse_deg_max=float(used.rmse.max()), contact=contact_scores, surrogate=model_scores)
     with open(os.path.join(a.out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=1)
@@ -212,7 +253,8 @@ def main(argv=None):
                 label=f"{short}: {path}")
     ax.axhline(1.4, color="#888888", lw=1, ls="--")
     ax.set_xlabel("time in trial (s)"); ax.set_ylabel("F_medial (BW)")
-    ax.set_title(f"{os.path.basename(trial)} · noise {a.noise_deg}° · drift {a.drift_deg_per_s}°/s", fontsize=10)
+    ax.set_title(f"{os.path.basename(trial)} · noise {a.noise_deg}° · drift {a.drift_deg_per_s}°/s · "
+                 f"{a.label_subdir} · M_x {a.mx_convention}", fontsize=10)
     ax.legend(fontsize=7, loc="upper right"); ax.grid(alpha=0.3); fig.tight_layout()
     fig.savefig(os.path.join(a.out, "fmedial.png"), dpi=110)
 

@@ -1,0 +1,5 @@
+subset,frames,segments,share_of_stance_frames,total_pred_mean,total_meas_mean,total_bias,total_ratio,total_r,medial_bias,medial_mae,medial_r
+all,1244,43,1.0000,3.3025,2.1195,1.1830,1.5582,0.6793,0.5022,0.6613,0.5633
+moving_cop,969,34,0.7789,3.2495,1.9767,1.2728,1.6439,0.7079,0.5137,0.6685,0.5765
+qc_pass,747,34,0.6005,2.7535,1.8782,0.8753,1.4661,0.7681,0.2772,0.4508,0.7271
+qc_fail,497,35,0.3995,4.1277,2.4823,1.6454,1.6629,0.5434,0.8403,0.9777,0.3458

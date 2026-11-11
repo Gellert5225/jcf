@@ -1,0 +1,7 @@
+subject,part,n_covered,n_edge_rejected,n_scored
+DM,early,3,0,3
+DM,late,8,5,3
+JW,early,5,0,5
+JW,late,4,0,4
+SC,early,4,0,4
+SC,late,6,0,6

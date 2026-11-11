@@ -10,3 +10,12 @@ __pycache__
 .DS_Store
 /paper
 .claude
+# thesis paper build products
+thesis_paper/*.aux
+thesis_paper/*.bbl
+thesis_paper/*.blg
+thesis_paper/*.out
+thesis_paper/*.synctex.gz
+# per-frame data derived from downloaded datasets (licence/use agreements): keep local
+results/thesis/gc/**/frames.csv.gz
+results/thesis/twente/**/frames/

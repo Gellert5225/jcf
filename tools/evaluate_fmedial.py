@@ -19,6 +19,36 @@ Usage (run from the repo root):
     python tools/evaluate_fmedial.py --ckpt seed1.pt seed2.pt seed3.pt --ensemble
     python tools/evaluate_fmedial.py --ckpt A.pt --dirs jcf/external/william_2026-09-23 --pelvis running
 
+    # score any checkpoint against the SO+JR labels (jcf_output_sojr/) instead of the ones it was trained on:
+    python tools/evaluate_fmedial.py --ckpt A.pt --label-subdir jcf_output_sojr --max-peak <BW> --max-moment <BW*H>
+
+    # only the frames that pass the SO+JR label QC (jcf_output_sojr/label_mask.npz, keep_r); the peak/moment
+    # filters are then off unless given (1000 = off) and a given value is judged on the kept frames only:
+    python tools/evaluate_fmedial.py --ckpt A.pt --label-subdir jcf_output_sojr --label-mask \
+        --max-peak 1000 --max-moment 1000 ...
+
+    # the pre-Nov-2026 numbers (M_x taken as +mx of walker_knee_r):
+    python tools/evaluate_fmedial.py --ckpt A.pt --mx-convention pipeline ...
+
+M_x sign (--mx-convention): every network predicts the raw walker_knee_r mx (the label). F_medial needs the medial
+moment, which is -mx at walker_knee_r (`physical`, the default; analysis/thesis/knee_mx_sign.py). The pipeline and
+the ISRR 2026 numbers used +mx (`pipeline`). The chosen sign multiplies the label and every model's raw M_x output
+alike, before any metric, so the M_x columns are the medial-positive moment under that convention and a checkpoint's
+own training sign (mx_medial_sign, shown in the README) does not enter the scoring.
+
+Label mask (--label-mask, off by default): score only the frames whose label passes the SO+JR label QC
+(<trial>/<--label-mask-subdir>/label_mask.npz, keep_r; analysis/thesis/so_label_qc.py masks), carried onto the
+scored frame grid exactly as training does (train_mlp.carry_label_mask). Windows are built on the full trial first.
+Folders without a mask stop the run; trials whose mask keeps no frame go to rejected.csv. With --label-mask the
+trial-level --max-peak / --max-moment filters default to off (train_mlp.MASKED_MAX_PEAK_BW / MASKED_MAX_MOMENT_BWH)
+and, when given, are judged on the kept frames' labels (train_mlp.kept_labels_pass), as in a *_sojrqc training run.
+
+Labels: each checkpoint records the label folder it was trained on (label_subdir; older checkpoints: their input
+set's, i.e. jcf_output). Without --label-subdir all checkpoints must agree on it; --label-subdir scores every
+checkpoint against that folder's BatchJCF_JointReaction_ReactionLoads.sto. A --split run stops when some folders have
+the stored jcf_output/ labels but none in that folder (unfinished relabel) unless --allow-partial-labels is given. A
+trial whose label file holds a NaN/inf is rejected ('non-finite labels' in rejected.csv).
+
 Outputs go to results/fmedial_eval/<name>/:
     summary.csv   frame-pooled metrics per model x activity x lab (and ALL), all frames and right stance
     persons.csv   the same per held-out person
@@ -29,7 +59,7 @@ Outputs go to results/fmedial_eval/<name>/:
 
 Data conventions follow training: labels and features come from the same
 loaders train_mlp.py uses (per-trial pelvis centering, trial-level rejection of
-|M_x| > 0.15 BW*H and resultant peaks above --max-peak). Right stance = right
+|M_x| above --max-moment BW*H and resultant peaks above --max-peak BW). Right stance = right
 foot vertical GRF above 5 % of body weight.
 """
 import argparse
@@ -50,6 +80,24 @@ if REPO not in sys.path:
 PAPER_FY_MAE_WALKING = 0.153            # ISRR 2026, GRF-free MLP, walking test set (Carter + Moore)
 CONTACT_BW = 0.05
 SPLIT_ROOTS = {"test": "jcf/full_duration/testing", "train": "jcf/full_duration/training"}
+LABEL_FILE = "BatchJCF_JointReaction_ReactionLoads.sto"
+LABEL_FILE_DEFAULT_SUBDIR = "jcf_output"   # stored labels; jcf_output_sojr/ = SO+JR (analysis/thesis/gc_knee_jr.py)
+MX_CONVENTION_SIGN = {"physical": -1.0, "pipeline": 1.0}   # factor on the raw walker_knee_r mx (= train_mlp.MX_CONVENTIONS)
+MASK_SUBDIR_DEFAULT = "jcf_output_sojr"                     # where so_label_qc.py writes label_mask.npz
+
+
+def medial_moment(mx, convention="physical"):
+    """Medial-positive M_x (BW*H) from the raw walker_knee_r mx of a label or a network output."""
+    if convention not in MX_CONVENTION_SIGN:
+        raise ValueError(f"convention must be one of {sorted(MX_CONVENTION_SIGN)}, got {convention!r}")
+    return MX_CONVENTION_SIGN[convention] * np.asarray(mx, dtype=float)
+
+
+def to_convention(arr, convention="physical"):
+    """Copy of a [T, 4] (Fx, Fy, Fz, Mx) label or prediction array with column 3 the medial-positive moment."""
+    out = np.array(arr, dtype=np.float64, copy=True)
+    out[:, 3] = medial_moment(out[:, 3], convention)
+    return out
 
 
 # ─── Formula and small helpers (pure functions, unit-tested) ─────────────────
@@ -158,14 +206,30 @@ def load_model(path, device):
                 activation=ck.get("activation", "relu"))
     m.load_state_dict(ck["model_state_dict"]); m.to(device).eval()
     prov = ck.get("provenance") or {}
+    from train_mlp import label_subdir_of
     info = dict(path=path, name=os.path.splitext(os.path.basename(path))[0], input_set=iset,
                 activity=ck.get("activity"), fmedial_weight=ck.get("fmedial_weight", 0.0),
                 epoch=int(ck.get("epoch", -1)) + 1, git=(prov.get("git") or {}).get("commit"),
-                exclude=(prov.get("call_args") or {}).get("exclude"))
+                exclude=(prov.get("call_args") or {}).get("exclude"),
+                label_subdir=ck.get("label_subdir") or label_subdir_of(INPUT_SETS[iset]),
+                mx_medial_sign=ck.get("mx_medial_sign"), label_mask=ck.get("label_mask"))
     return m, ck["input_mean"].to(device).float(), ck["input_std"].to(device).float(), info
 
 
-def trial_dirs(args):
+def resolve_label_subdir(trained, override=None):
+    """Label folder to score against: override (--label-subdir), else the one all checkpoints were trained on."""
+    if override:
+        return override.strip("/")
+    found = sorted(set(trained))
+    if len(found) > 1:
+        raise SystemExit(f"the checkpoints were trained on different labels ({', '.join(found)}); "
+                         "pass --label-subdir to choose the labels they are all scored against")
+    return found[0] if found else LABEL_FILE_DEFAULT_SUBDIR
+
+
+def trial_dirs(args, label_subdir=LABEL_FILE_DEFAULT_SUBDIR, skipped=None):
+    """(activity, folder) pairs to score: folders with <label_subdir>/ labels. A folder with the stored jcf_output/
+    labels but none in label_subdir/ is appended to skipped (when given) instead."""
     out = []
     if args.dirs:
         for d in args.dirs:
@@ -176,26 +240,40 @@ def trial_dirs(args):
         base = os.path.join(REPO, root, act)
         for name in sorted(os.listdir(base)) if os.path.isdir(base) else []:
             d = os.path.join(base, name)
-            if not os.path.isdir(d) or not os.path.exists(os.path.join(d, "jcf_output", "BatchJCF_JointReaction_ReactionLoads.sto")):
+            if not os.path.isdir(d):
                 continue
             lab = name.split("_")[0]
             if args.exclude and lab in args.exclude:
                 continue
             if args.labs and lab not in args.labs:
                 continue
+            if not os.path.exists(_label_path(d, label_subdir)):
+                if skipped is not None and os.path.exists(_label_path(d, LABEL_FILE_DEFAULT_SUBDIR)):
+                    skipped.append((act, d))
+                continue
             out.append((act, d))
     return out
 
 
+def _label_path(d, label_subdir):
+    """<d>/<label_subdir>/BatchJCF_JointReaction_ReactionLoads.sto, or the FullDuration_ file (train_cnn.jr_label_path)."""
+    from train_cnn import jr_label_path
+    return jr_label_path(d, label_subdir)
+
+
 def _read_sto(path):
+    """OpenSim table with every column as float (train_cnn.load_sto: a padded '-nan' or other text becomes NaN)."""
+    from train_cnn import load_sto
     with open(path) as f:
         lines = f.read().split("\n")
     hdr = next(i for i, l in enumerate(lines) if l.strip() == "endheader") + 1
-    return pd.read_csv(path, sep="\t", skiprows=hdr)
+    return load_sto(path, skiprows=hdr)
 
 
-def rejection_reason(d, max_peak, foot_points=()):
-    """Why the training loaders dropped a trial (best effort)."""
+def rejection_reason(d, max_peak, foot_points=(), label_subdir=LABEL_FILE_DEFAULT_SUBDIR, max_moment=0.15,
+                     mask_subdir=None):
+    """Why the training loaders dropped a trial (best effort). mask_subdir (--label-mask): the peak and moment tests
+    look at the JR rows its label_mask.npz keeps, as the loaders do (on the carried kept frames)."""
     try:
         meta = json.load(open(os.path.join(d, "metadata.json")))
     except Exception:
@@ -206,16 +284,33 @@ def rejection_reason(d, max_peak, foot_points=()):
     for fp in foot_points:
         if fp is not None and not os.path.exists(os.path.join(d, foot_point_filename(fp))):
             return f"missing {foot_point_filename(fp)}"
+    label_path = _label_path(d, label_subdir)
+    if not os.path.exists(label_path):
+        return f"no {label_subdir}/ labels"
     try:
-        j = _read_sto(os.path.join(d, "jcf_output", "BatchJCF_JointReaction_ReactionLoads.sto"))
+        from train_cnn import nonfinite_rows
+        j = _read_sto(label_path)
+        n_bad = nonfinite_rows(j)
+        if n_bad:
+            return f"non-finite labels ({n_bad} of {len(j)} rows in {label_subdir}/)"
         BW = float(meta["mass_kg"]) * 9.81; H = float(meta.get("height_m", 1.7))
         pre = "walker_knee_r_on_tibia_r_in_tibia_r_"
         mx = np.abs(j[pre + "mx"].to_numpy()) / (BW * H)
         res = np.sqrt(sum(j[pre + c].to_numpy() ** 2 for c in ("fx", "fy", "fz"))) / BW
-        if mx.max() > 0.15:
-            return f"|Mx| peak {mx.max():.2f} BW*H > 0.15 (label corruption filter)"
+        where = ""
+        if mask_subdir is not None:
+            from train_mlp import LABEL_MASK_FILE, LABEL_MASK_KEY
+            with np.load(os.path.join(d, mask_subdir, LABEL_MASK_FILE)) as z:
+                keep = np.asarray(z[LABEL_MASK_KEY], bool)
+            if len(keep) != len(j):
+                return f"label mask does not match the {label_subdir}/ label rows"
+            if not keep.any():
+                return "label mask keeps no frame"
+            mx, res, where = mx[keep], res[keep], " on QC-kept rows"
+        if mx.max() > max_moment:
+            return f"|Mx| peak {mx.max():.2f} BW*H > {max_moment:g}{where} (label corruption filter)"
         if res.max() > max_peak:
-            return f"resultant peak {res.max():.1f} BW > {max_peak:g}"
+            return f"resultant peak {res.max():.1f} BW > {max_peak:g}{where}"
     except Exception as e:
         return f"labels unreadable ({type(e).__name__})"
     return "rejected by loader (length, alignment or missing channels)"
@@ -231,16 +326,28 @@ def sampling_rate(d, T):
 
 
 def features_for(d, cfg, args):
-    """Windowed features + labels for one trial, exactly as train_mlp.FrameDataset builds them."""
-    from train_mlp import _build_com_features, _windowize_positions_only, _windowize
-    built = _build_com_features(d, cfg, max_peak_bw=args.max_peak, min_length=1, predict_moment=True)
+    """Windowed features + labels + frame meta for one trial, exactly as train_mlp.FrameDataset builds them.
+
+    With --deploy-features every checkpoint gets deployment-style inputs (exact time alignment, 20 frames at 100 Hz,
+    as the optimizer and the PN3 driver feed them), whatever input set it was trained with. Labels come from cfg's
+    label_subdir (main() sets it to the resolved --label-subdir)."""
+    from train_mlp import _build_com_features, _windowize_positions_only, _windowize, LABEL_MASK_FILE
+    if getattr(args, "deploy_features", False):
+        cfg = dict(cfg, time_exact=True, resample_hz=100.0)
+    # the frame mask is a scoring choice here (--label-mask), not a property of the checkpoint's input set
+    cfg = {k: v for k, v in cfg.items() if k not in ("label_mask", "label_mask_subdir")}
+    if getattr(args, "label_mask", False):
+        cfg.update(label_mask=LABEL_MASK_FILE, label_mask_subdir=getattr(args, "label_mask_subdir", MASK_SUBDIR_DEFAULT))
+    built = _build_com_features(d, cfg, max_peak_bw=args.max_peak, min_length=1, predict_moment=True, return_meta=True,
+                                max_moment_bwh=getattr(args, "max_moment", 0.15))
     if built is None:
         return None
-    feat, labels, mass = built
+    feat, labels, mass, fmeta = built
     if args.pelvis == "running" and not cfg.get("drop_pelvis_translation") and not cfg.get("pelvis_per_window_centering"):
         from inference_posture_surrogate import remove_pelvis_drift
         feat = feat.copy()
-        feat[:, 3:6] = remove_pelvis_drift(feat[:, 3:6], fs_hz=sampling_rate(d, len(feat))).astype(feat.dtype)
+        fs = fmeta.get("fs") or sampling_rate(d, len(feat))
+        feat[:, 3:6] = remove_pelvis_drift(feat[:, 3:6], fs_hz=fs).astype(feat.dtype)
     w = cfg.get("window", 1)
     if w > 1:
         if cfg.get("window_only_positions"):
@@ -248,14 +355,18 @@ def features_for(d, cfg, args):
                                              pelvis_t_cols=(3, 4, 5) if cfg.get("pelvis_per_window_centering") else None)
         else:
             feat = _windowize(feat, w, replicate_q=cfg.get("replicate_q", False))
-    return feat, labels
+    return feat, labels, fmeta
 
 
-def right_stance(d, args, T):
+def right_stance(d, args, T, label_subdir=LABEL_FILE_DEFAULT_SUBDIR):
     """Right-foot contact from the same load_subject call the feature builder uses."""
     from train_cnn import load_subject
+    # with --label-mask the peak/moment tests were already made on the kept frames (features_for); not on every row here
+    lm = getattr(args, "label_mask", False)
     r = load_subject(d, lower_body_only=True, clean_features=True, include_mass=True, include_speed=False,
-                     predict_moment=True, max_peak_bw=args.max_peak, min_length=1, native_time_grid=True)
+                     jcf_subdir=label_subdir, predict_moment=True, max_peak_bw=np.inf if lm else args.max_peak,
+                     max_moment_bwh=np.inf if lm else getattr(args, "max_moment", 0.15), min_length=1,
+                     native_time_grid=True)
     if r is None or r[0].shape[1] < 53 or len(r[0]) != T:
         return None
     return np.abs(r[0][:, 49]) > CONTACT_BW
@@ -271,24 +382,54 @@ def main(argv=None):
     ap.add_argument("--activity", nargs="+", default=["walking", "static"], choices=["walking", "static"])
     ap.add_argument("--exclude", nargs="+", default=None, help="labs to skip, e.g. han fregly")
     ap.add_argument("--labs", nargs="+", default=None, help="only these labs")
-    ap.add_argument("--max-peak", type=float, default=6.0)
+    ap.add_argument("--max-peak", type=float, default=None,
+                    help="drop trials whose right-knee force resultant exceeds this many BW in any frame (default 6; "
+                         "with --label-mask: off (1000) by default, and judged on the kept frames)")
+    ap.add_argument("--max-moment", type=float, default=None,
+                    help="drop trials whose |M_x| exceeds this many BW*H in any frame (label corruption filter; "
+                         "default 0.15; with --label-mask: off (1000) by default, and judged on the kept frames)")
+    ap.add_argument("--label-subdir", default=None,
+                    help="score against <trial>/<this>/BatchJCF_JointReaction_ReactionLoads.sto, e.g. jcf_output "
+                         "(stored) or jcf_output_sojr (SO+JR); default: the labels the checkpoints were trained on")
+    ap.add_argument("--mx-convention", choices=sorted(MX_CONVENTION_SIGN), default="physical",
+                    help="medial moment from the raw walker_knee_r mx, for labels and model outputs alike: physical "
+                         "= -mx (default), pipeline = +mx (the pre-Nov-2026 numbers)")
+    ap.add_argument("--label-mask", action="store_true",
+                    help="score only frames whose label passes the SO+JR QC (<trial>/<--label-mask-subdir>/"
+                         "label_mask.npz, keep_r); default off")
+    ap.add_argument("--label-mask-subdir", default=MASK_SUBDIR_DEFAULT,
+                    help=f"--label-mask: folder of label_mask.npz (default {MASK_SUBDIR_DEFAULT}; its time column must "
+                         "match the scored label file)")
     ap.add_argument("--phi", type=float, nargs="+", default=[0.5])
     ap.add_argument("--d-mm", type=float, nargs="+", default=[45.0])
     ap.add_argument("--limit", type=float, default=1.4, help="pain limit in BW for the crossing agreement")
     ap.add_argument("--pelvis", choices=["trial", "running"], default="trial",
                     help="trial = per-trial centering as in training; running = 1.2 s drift removal (overground trajectories)")
+    ap.add_argument("--deploy-features", action="store_true",
+                    help="feed every checkpoint deployment-style inputs: exact time alignment, 20 frames at 100 Hz")
     ap.add_argument("--ensemble", action="store_true", help="also score the mean of all checkpoints, with a +-2 sigma coverage")
     ap.add_argument("--labels", nargs="+", default=None, help="short display names, one per --ckpt (e.g. paper september)")
     ap.add_argument("--flat-filter", action="store_true",
                     help="drop flat (standing-like) walking trials with training's filter; off by default, as in the paper's test")
+    ap.add_argument("--flat-cv", type=float, default=0.25, help="--flat-filter: coefficient-of-variation threshold")
+    ap.add_argument("--flat-dr", type=float, default=0.3, help="--flat-filter: range (max - min) threshold in BW")
+    ap.add_argument("--flat-labels", default=None, metavar="SUBDIR",
+                    help="--flat-filter judges this label folder (default: the labels being scored); jcf_output keeps "
+                         "the stored-label trial selection when scoring against jcf_output_sojr")
+    ap.add_argument("--allow-partial-labels", action="store_true",
+                    help="--split runs: score the folders that have the labels even when some folders have only the "
+                         "stored jcf_output/ labels (default: stop)")
     ap.add_argument("--max-trials", type=int, default=None, help="cap trials per activity (smoke tests)")
     ap.add_argument("--plots", action="store_true", help="one F_medial time-series plot per person")
     ap.add_argument("--name", default=None, help="results/fmedial_eval/<name> (default: timestamp)")
     ap.add_argument("--out-root", default=os.path.join(REPO, "results", "fmedial_eval"))
     args = ap.parse_args(argv)
 
-    from train_mlp import INPUT_SETS
+    from train_mlp import INPUT_SETS, label_filter_defaults, LABEL_MASK_FILE
     import provenance as prov
+    # 6 BW / 0.15 BW*H, or off with --label-mask (train_mlp.label_filter_defaults, as for a *_sojrqc training run)
+    args.max_peak, args.max_moment = label_filter_defaults(dict(label_mask=LABEL_MASK_FILE if args.label_mask else None),
+                                                           args.max_peak, args.max_moment)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     models = [load_model(p, device) for p in args.ckpt]
@@ -306,18 +447,36 @@ def main(argv=None):
     phi0 = 0.5 if 0.5 in args.phi else args.phi[0]
     d0 = 45.0 if 45.0 in args.d_mm else args.d_mm[0]
     out_dir = os.path.join(args.out_root, args.name or datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(out_dir, exist_ok=True)
 
-    dirs = trial_dirs(args)
+    label_subdir = resolve_label_subdir([m[3]["label_subdir"] for m in models], args.label_subdir)
+    no_labels = []
+    dirs = trial_dirs(args, label_subdir, skipped=no_labels)
+    if no_labels:
+        by_lab = pd.Series([lab_of(d) for _a, d in no_labels]).value_counts().sort_index()
+        msg = (f"{len(no_labels)} folders have jcf_output/ labels but no {label_subdir}/ labels ("
+               + ", ".join(f"{lab} {n}" for lab, n in by_lab.items()) + f"; e.g. {os.path.basename(no_labels[0][1])})")
+        if not getattr(args, "allow_partial_labels", False):
+            raise SystemExit(f"{msg}. Scoring the rest would change the trial set; finish the relabel (check: python "
+                             "analysis/thesis/sojr_trainset.py --gate) or pass --allow-partial-labels.")
+        print(f"WARNING (--allow-partial-labels): {msg}; skipped")
+    rejected = []
     n_flat_removed = 0
+    flat_sub = (args.flat_labels or label_subdir).strip("/")
     if args.flat_filter:
         from train_cnn import filter_flat_subjects
         walk = [d for act, d in dirs if act == "walking"]
-        kept = filter_flat_subjects(walk)
-        kept = set(kept[0] if isinstance(kept, tuple) else kept)
-        n_flat_removed = len(walk) - len(kept)
+        bad = []
+        kept, _n = filter_flat_subjects(walk, cv_threshold=args.flat_cv, dr_threshold=args.flat_dr,
+                                        jcf_subdir=flat_sub, nonfinite=bad)
+        kept, bad = set(kept), set(bad)
+        n_flat_removed = len(walk) - len(kept) - len(bad)
+        for act, d in dirs:     # non-finite trials are reported, not counted as flat
+            if d in bad:
+                rejected.append(dict(activity=act, lab=lab_of(d), person=person_id(d), trial=os.path.basename(d),
+                                     reason=f"non-finite labels in {flat_sub}/ (flat filter)"))
         dirs = [(act, d) for act, d in dirs if act != "walking" or d in kept]
-        print(f"flat filter: removed {n_flat_removed} of {len(walk)} walking trials")
+        print(f"flat filter ({flat_sub}/ labels): removed {n_flat_removed} of {len(walk)} walking trials"
+              + (f"; {len(bad)} more have non-finite labels" if bad else ""))
     if args.max_trials:
         capped, seen = [], {}
         for act, d in dirs:
@@ -325,12 +484,25 @@ def main(argv=None):
             if seen[act] <= args.max_trials:
                 capped.append((act, d))
         dirs = capped
-    print(f"{len(dirs)} trial folders; {len(models)} checkpoint(s); phi={args.phi} d_mm={args.d_mm}; pelvis={args.pelvis}")
+    if args.label_mask:
+        from train_mlp import LABEL_MASK_FILE
+        no_mask = [d for _a, d in dirs if not os.path.exists(os.path.join(d, args.label_mask_subdir, LABEL_MASK_FILE))]
+        if no_mask:
+            by_lab = pd.Series([lab_of(d) for d in no_mask]).value_counts().sort_index()
+            raise SystemExit(f"--label-mask: {len(no_mask)} of {len(dirs)} folders have no {args.label_mask_subdir}/"
+                             f"{LABEL_MASK_FILE} (" + ", ".join(f"{lab} {n}" for lab, n in by_lab.items())
+                             + f"; e.g. {os.path.basename(no_mask[0])}); write them with: python -I "
+                               "analysis/thesis/so_label_qc.py masks")
+    n_mask_total = n_mask_kept = 0
+    print(f"{len(dirs)} trial folders; {len(models)} checkpoint(s); labels {label_subdir}/; "
+          f"phi={args.phi} d_mm={args.d_mm}; pelvis={args.pelvis}; M_x convention {args.mx_convention}"
+          + (f"; frames: {args.label_mask_subdir}/label_mask.npz keep_r" if args.label_mask else ""))
+    os.makedirs(out_dir, exist_ok=True)     # after the checks above, so a stopped run leaves no empty folder
 
     model_names = names + (["ensemble"] if args.ensemble and len(models) >= 2 else [])
     blocks = {n: [] for n in model_names}       # per-frame blocks at (phi0, d0), with meta
     raw = {n: [] for n in model_names}          # (gt, pred, H, stance, meta) for the sweep
-    trial_rows, rejected, sign_rows = [], [], []
+    trial_rows, sign_rows = [], []
     plot_first = {}
 
     for i, (act, d) in enumerate(dirs):
@@ -339,31 +511,47 @@ def main(argv=None):
             H = float(json.load(open(os.path.join(d, "metadata.json"))).get("height_m", 1.7))
         except Exception:
             H = 1.7
-        preds, gt, T = {}, None, None
+        preds, gt, T, fmeta = {}, None, None, None
         cache = {}
         for (m, mu, sd, info), n in zip(models, names):
             iset = info["input_set"]
             if iset not in cache:
-                cache[iset] = features_for(d, INPUT_SETS[iset], args)
+                cache[iset] = features_for(d, dict(INPUT_SETS[iset], label_subdir=label_subdir), args)
             built = cache[iset]
             if built is None:
                 break
-            feat, labels = built
+            feat, labels, fm_ = built
             with torch.no_grad():
                 x = (torch.from_numpy(feat).float().to(device) - mu) / sd
                 preds[n] = m(x).cpu().numpy()
             if gt is None:
-                gt, T = labels, len(labels)
+                gt, T, fmeta = labels, len(labels), fm_
             elif len(labels) != T:
-                raise RuntimeError(f"{d}: input sets disagree on trial length ({len(labels)} vs {T})")
+                raise RuntimeError(f"{d}: input sets disagree on trial length ({len(labels)} vs {T}); "
+                                   "mixing native-rate and _t100 checkpoints needs --deploy-features")
         if gt is None or len(preds) < len(models):
             fps = [INPUT_SETS[info["input_set"]].get("foot_point") for (_m, _mu, _sd, info) in models]
-            rejected.append(dict(meta, reason=rejection_reason(d, args.max_peak, fps)))
+            rejected.append(dict(meta, reason=rejection_reason(d, args.max_peak, fps, label_subdir, args.max_moment,
+                                                               args.label_mask_subdir if args.label_mask else None)))
             continue
-        stance = right_stance(d, args, T)
+        stance = fmeta["r_contact"] if fmeta and fmeta.get("r_contact") is not None and len(fmeta["r_contact"]) == T \
+            else right_stance(d, args, T, label_subdir)
         if stance is None:
             rejected.append(dict(meta, reason="could not align ground-force channels for the stance gate"))
             continue
+        if args.label_mask:             # predictions were made on full windows; score the QC-passing frames only
+            keep = np.asarray(fmeta["label_keep"], dtype=bool)
+            n_mask_total += T
+            n_mask_kept += int(keep.sum())
+            if not keep.any():
+                rejected.append(dict(meta, reason=f"label mask keeps no frame ({args.label_mask_subdir}/label_mask.npz)"))
+                continue
+            gt, stance, T = gt[keep], np.asarray(stance, bool)[keep], int(keep.sum())
+            preds = {n: p[keep] for n, p in preds.items()}
+            fmeta = dict(fmeta, t=np.asarray(fmeta["t"])[keep]) if fmeta.get("t") is not None else fmeta
+        # one M_x convention for the label and every raw model output (column 3 becomes the medial-positive moment)
+        gt = to_convention(gt, args.mx_convention)
+        preds = {n: to_convention(p, args.mx_convention) for n, p in preds.items()}
         frac, ok = sign_check(gt[:, 1], stance)
         sign_rows.append(dict(meta, fy_negative_frac_in_stance=frac, ok=ok))
         if args.ensemble and len(models) >= 2:
@@ -387,12 +575,15 @@ def main(argv=None):
                     row.update(peak_metrics(b))
                 trial_rows.append(row)
         if args.plots and (act, meta["person"]) not in plot_first:
-            plot_first[(act, meta["person"])] = (d, gt, preds, H, stance, act)
+            plot_first[(act, meta["person"])] = (d, gt, preds, H, stance, act, (fmeta or {}).get("fs"),
+                                                 (fmeta or {}).get("t"))
         if (i + 1) % 50 == 0:
             print(f"  {i + 1}/{len(dirs)}", flush=True)
 
     if not trial_rows:
-        raise SystemExit("no trials could be evaluated")
+        reasons = pd.Series([r["reason"] for r in rejected]).value_counts() if rejected else None
+        raise SystemExit("no trials could be evaluated" + ("" if reasons is None else "; rejected (first reasons): " +
+                         "; ".join(f"{n} x {why}" for why, n in reasons.head(5).items())))
 
     # ── frame-pooled summaries ──
     def pooled(bl_list, mask_key):
@@ -476,8 +667,9 @@ def main(argv=None):
     if args.plots and plot_first:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
         os.makedirs(os.path.join(out_dir, "plots"), exist_ok=True)
-        for (_, p), (d, gt, preds, H, stance, act) in plot_first.items():
-            t = np.arange(len(gt)) / sampling_rate(d, len(gt))
+        for (_, p), (d, gt, preds, H, stance, act, fs, tf) in plot_first.items():
+            t = (np.asarray(tf) - tf[0]) if tf is not None and len(tf) == len(gt) else \
+                np.arange(len(gt)) / (fs or sampling_rate(d, len(gt)))
             fig, ax = plt.subplots(figsize=(11, 3.6))
             ax.fill_between(t, -0.5, 3.0, where=stance, color="#EEEEEE", lw=0, step="mid")
             ax.plot(t, fmedial(np.abs(gt[:, 1]), gt[:, 3], phi0, d0, H), color="#000000", lw=2, label="OpenSim")
@@ -494,14 +686,34 @@ def main(argv=None):
              f"- command: `{' '.join(['python'] + sys.argv)}`",
              f"- git: {g.get('commit')} ({'DIRTY' if g.get('dirty') else 'clean'})",
              f"- split: {'external folders' if args.dirs else args.split}; activities: {', '.join(args.activity)}; "
-             f"excluded labs: {args.exclude or 'none'}; pelvis: {args.pelvis}; phi={phi0}, d={d0} mm; limit {args.limit} BW"
-             + (f"; flat filter removed {n_flat_removed} walking trials" if args.flat_filter else "; no flat filter"),
+             f"excluded labs: {args.exclude or 'none'}; pelvis: {args.pelvis}; features: {'deployment-style (exact time, 100 Hz)' if args.deploy_features else 'as trained'}; phi={phi0}, d={d0} mm; limit {args.limit} BW"
+             + (f"; flat filter (CV < {args.flat_cv:g} or range < {args.flat_dr:g} BW of the {flat_sub}/ labels) "
+                f"removed {n_flat_removed} walking trials" if args.flat_filter else "; no flat filter"),
+             f"- M_x convention: {args.mx_convention} (medial moment = "
+             f"{'-' if args.mx_convention == 'physical' else '+'}mx of walker_knee_r, applied to the labels and to every "
+             f"model's raw M_x output; the M_x columns are that medial moment"
+             + ("; pre-Nov-2026 runs used pipeline)" if args.mx_convention == "physical" else
+                "; reproduces the pre-Nov-2026 numbers, physically the lateral moment)"),
+             f"- frames: " + (f"label mask {args.label_mask_subdir}/label_mask.npz (keep_r), {n_mask_kept} of "
+                              f"{n_mask_total} frames of the scored trials kept "
+                              f"({n_mask_kept / max(n_mask_total, 1):.1%})" if args.label_mask else
+                              "all frames (no label mask)"),
+             f"- labels: {label_subdir}/{LABEL_FILE}"
+             + (" (--label-subdir)" if args.label_subdir else " (as trained)")
+             + f"; trial filters: resultant peak <= {args.max_peak:g} BW, |M_x| <= {args.max_moment:g} BW*H"
+             + (" on the QC-kept frames" if args.label_mask else "")
+             + (f"; {len(no_labels)} folders with jcf_output/ labels but none in {label_subdir}/ were skipped" if no_labels else ""),
              f"- trials evaluated: {len({(r['activity'], r['trial']) for r in trial_rows})}; rejected by the label filters: {len(rej)} "
              f"({', '.join(f'{k} {v}' for k, v in rej['lab'].value_counts().items()) if len(rej) else 'none'})", "",
-             "## Checkpoints", "", "| name | input set | trained on | F_medial loss weight | epoch | trained at commit |", "|---|---|---|---|---|---|"]
+             "## Checkpoints", "", "| name | input set | trained on | trained labels | F_medial loss weight | "
+             "loss M_x sign | epoch | trained at commit |",
+             "|---|---|---|---|---|---|---|---|"]
     for (_, _, _, info) in models:
+        sgn = info.get("mx_medial_sign")
         lines.append(f"| {info['name']} | {info['input_set']} | {info['activity']}, exclude {info['exclude'] or 'unknown'} | "
-                     f"{info['fmedial_weight']} | {info['epoch']} | {info['git'][:10] if info['git'] else 'no provenance'} |")
+                     f"{info['label_subdir']}{' + ' + info['label_mask'] if info.get('label_mask') else ''} | "
+                     f"{info['fmedial_weight']} | {'+1 (legacy, not stored)' if sgn is None else format(sgn, '+g')} | "
+                     f"{info['epoch']} | {info['git'][:10] if info['git'] else 'no provenance'} |")
     lines += ["", "## Headline: frame-pooled error, all labs (BW; moment in BW·H)", "",
               "| model | activity | subset | persons | F_medial MAE | person-mean ± sd | F_y MAE | M_x MAE | force-part bias | moment-part bias | peak error |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]

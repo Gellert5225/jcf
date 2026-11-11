@@ -1,0 +1,57 @@
+% fig1_overview.tex -- Fig. 1, pipeline under audit (one column).
+% Drawn with the built-in LaTeX picture environment because TikZ (pgf) is not installed
+% in the local TeX Live. Coordinates are in mm; the picture is 88 mm wide (column 88.9 mm).
+% Needs \Fmed and the colour "accent" from main.tex. Tags: D1-D4 = defects found by the audit,
+% S1-S4 = sensitivity factors (Sec. III).
+\newcommand{\audittag}[1]{\colorbox{black!12}{\strut\textbf{#1}}}
+\begin{figure}[t]
+\centering
+{\scriptsize
+\setlength{\unitlength}{1mm}%
+\setlength{\fboxsep}{0.6pt}%
+\begin{picture}(88,36)
+  % ---- references (dashed, top row) ----
+  \put(18,24){\dashbox{1}(31,8){\begin{tabular}{@{}c@{}}SO+JR labels\\(minutes per trial)\end{tabular}}}
+  \put(36.5,32.6){\audittag{D1, D3}}
+  \put(52,24){\dashbox{1}(36,8){\begin{tabular}{@{}c@{}}Instrumented knee implant\\(in vivo medial force)\end{tabular}}}
+  % ---- lab path (middle row) ----
+  \put(0,12){\framebox(15,8){\begin{tabular}{@{}c@{}}Lab motion\\capture\end{tabular}}}
+  \put(15,16){\vector(1,0){3}}
+  \put(18,12){\framebox(15,8){\begin{tabular}{@{}c@{}}Inverse\\kinematics\end{tabular}}}
+  \put(33,16){\vector(1,0){3}}
+  \put(29.6,8.6){\audittag{D4}}
+  % GRF and IK feed the SO+JR labels; the labels train and test the surrogate
+  \put(7.5,20){\line(0,1){8}}
+  \put(7.5,28){\vector(1,0){10.5}}
+  \put(7.5,28.4){\makebox(10.5,2.5)[b]{GRF}}
+  \put(25.5,20){\vector(0,1){4}}
+  \put(42.5,24){\vector(0,-1){4}}
+  % ---- wearable path (bottom row, accent) ----
+  {\color{accent}%
+  \put(0,0){\framebox(15,8){\begin{tabular}{@{}c@{}}Wearable\\IMU suit\end{tabular}}}
+  \put(15,4){\vector(1,0){3}}
+  \put(18,0){\framebox(15,8){\begin{tabular}{@{}c@{}}UKF +\\contacts\end{tabular}}}
+  \put(33,4){\vector(1,0){3}}}
+  % ---- surrogate ----
+  \put(36,0){\colorbox{black!8}{\makebox(13,20){}}}
+  \put(36,0){\framebox(13,20){\begin{tabular}{@{}c@{}}Surrogate\\MLP\\[3pt]\audittag{S2--S4}\end{tabular}}}
+  % ---- output and uses ----
+  \put(49,10){\vector(1,0){2.5}}
+  \put(52,9.5){\makebox(8,6){$\Fmed$}}
+  \put(51,3.4){\audittag{D2, S1}}
+  \put(60,10){\line(1,0){2}}
+  \put(62,4){\line(0,1){12}}
+  \put(62,16){\vector(1,0){3}}
+  \put(62,4){\vector(1,0){3}}
+  \put(65,12){\framebox(23,8){\begin{tabular}{@{}c@{}}Gait optimizer\\(\Chong{}~\citeChong{})\end{tabular}}}
+  \put(65,0){\framebox(23,8){\begin{tabular}{@{}c@{}}Redis $\rightarrow$ visualizer\\(live monitoring)\end{tabular}}}
+  % in vivo force is compared with the predicted F_medial (dashed)
+  \multiput(56,24)(0,-2){4}{\line(0,-1){1}}
+  \put(56,16){\vector(0,-1){1}}
+\end{picture}}
+\caption{Pipeline under audit. Kinematics from a lab or a wearable IMU suit (accent) feed a
+surrogate that predicts $\Fmed$ without ground reaction forces (GRF), for the gait optimizer of
+\Chong{}~\citeChong{} or for live monitoring. Dashed: references. Grey tags:
+defects found (D1--D4) and sensitivity factors (S1--S4).}
+\label{fig:overview}
+\end{figure}
