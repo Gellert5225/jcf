@@ -7,7 +7,13 @@
 % labels and for every optimizer run that forms the proxy with +M_x at the right knee, NOT on the in
 % vivo r of the two audited checkpoints: which checkpoint produced the figures of [4] is unconfirmed
 % (facts ISRR4; TODO before submission: confirm with the first author). SC residual over-read:
-% checks/sc_qc_overread.csv; 25.4 %: labels_qc/label_masks/by_lab.csv (see results.tex).
+% audit_gc/qc_keep/summary.csv; 25.4 %: labels_qc/label_masks/by_lab.csv (see results.tex).
+% Moore share: 92.6 % of QC-passing training frames (labels_qc/label_masks/dry_build_fpopt/
+% kept_by_lab.csv, 327,287 / 353,581) and 92.9 % of held-out stance frames (fmedial_eval/
+% audit_test_qc/summary.csv, 31,515 / 33,915). Optimizer input convention for the pelvis angles is
+% unverified (sep23/README.md; evals_final.md fix:sep23). The reference motion's COP is pinned at the optimizer's
+% contact point, which alone fails the fixed-COP rule (sep23/README.md), so verifying synthesized gaits needs a
+% moving COP as well as converted pelvis angles. Test split: one person per lab (fmedial_eval/audit_test_qc).
 \section{Discussion}\label{sec:discussion}
 \textit{What the audit means for the optimizer.} \Chong{}~\citeChong{} describe SO+JR labels
 and a medial-positive moment, but the stored labels lack the SO muscle forces (D1) and the
@@ -15,40 +21,45 @@ inference code uses the inverted sign (D2). D1 affects every checkpoint trained 
 labels and D2 every optimizer run with this proxy, whichever checkpoint it queried; held-out
 accuracy hid both, because training and test labels share them. The reported load reductions are
 surrogate predictions not checked with SO+JR, so this audit can neither confirm nor refute them,
-and the in vivo scores of the two audited checkpoints need not carry over to others. The
-synthesized gaits may still unload the knee; SO+JR with quality-checked labels on them would
-settle it.
+and the in vivo scores of the two audited checkpoints need not carry over to others. On the
+optimizer's reference motion, corrected and legacy models fall on opposite sides of the limit.
+Running SO+JR on the synthesized gaits, with converted pelvis angles and a moving COP, would test in
+the model whether they unload the knee; in vivo confirmation needs measurement.
 
 \textit{Neither label source is ground truth.} The stored labels are too low and the SO+JR
-labels too high. The quality rules remove the worst of D3 but keep only 25.4\% of stance time and
-little of Carter or Tiziana, and SC frames that pass them are still over-read
-(Sec.~\ref{sec:res-d3}). On SC, Kaneda et al.'s SO+JR, with
-separate medial and lateral contacts, reached an MAE of 0.28~BW against the implant, so SO+JR can
-do much better than our labels; their contact model is one candidate for the difference.
+labels too high. The quality rules remove the worst of D3 but keep only a quarter of stance time
+and little of Carter or Lencioni, and frames that pass them are still over-read in all three knees
+(Sec.~\ref{sec:res-d3}); the corrected baseline inherits this. On SC, Kaneda et al.'s SO+JR, with
+separate medial and lateral contacts, fitted the implant far better (Sec.~\ref{sec:res-invivo}),
+so SO+JR can do better than our labels; their contact model may explain the difference.
 Re-solving SO per frame and repairing the COP would keep more data.
 
-\textit{Recommendations.} For learned models that act on people: (i)~check that the physics ran
-as described (D1); (ii)~test sign conventions on a case with a known answer (D2); (iii)~compare
-label magnitudes with in vivo data (D3); (iv)~build features with the deployment code (D4);
-(v)~report seed spread, and verify optimized motions with physics before they reach a patient.
+\textit{Recommendations.} For learned models whose outputs act on people: (i)~check that the physics ran
+as described (D1); (ii)~test sign and axis conventions on a case with a known answer (D2, S2);
+(iii)~compare label magnitudes with in vivo data (D3); (iv)~build features with the deployment
+code (D4); (v)~report seed spread off the training distribution, and verify optimized motions
+with physics before they reach a patient.
 
 \textit{Social impact.} Gait retraining has lowered KAM and pain~\cite{shull2013six}, and a
-wearable surrogate could take pain-aware coaching out of the lab. The main risk is false
-reassurance: a model that under-reads medial load certifies a harmful gait as safe, while one
-trained on inflated labels steers patients toward needless changes. None of the four defects
-showed in held-out testing; physics, implants and the deployment code exposed them. $\Fmed$
-remains a proxy, and medial load is not pain, so use with patients also requires clinical
-validation.
+wearable surrogate could take pain-aware coaching out of the lab once contact detection works in
+slow walking and its loads agree with in vivo measurement. The main risk is false reassurance: an under-reading model certifies a harmful gait as
+safe, while an over-reading one steers patients toward needless changes. $\Fmed$ remains a proxy, and medial load is not pain, so patient use
+also needs clinical validation.
 
 \textit{Limitations.} The in vivo subjects are three knee-replacement patients, not OA knees; most
-segments cover only half a stance, and DM's timing is uncertain. Our SO+JR uses a single knee
-contact. The 40 peaks were hand-picked, so their causes are not prevalences. The optimizer was not
-available, its reference motion is one trajectory labelled with a borrowed scaled model, and the
-real-sensor data have no knee-load labels.
+segments cover only half a stance, peak errors rest on 3--6 windows per knee and half, and DM's
+timing is uncertain. Our SO+JR uses a single knee contact. The 40 peaks were hand-picked, so their
+causes are not prevalences. The test split has one person per lab; Moore supplies 93\% of the
+quality-checked training frames, and one Moore person 93\% of the held-out frames. The optimizer
+was not available, so its pelvis-angle convention is unverified, and S1 is not propagated through
+it (future work). The real-sensor data have no knee-load labels, and the suit's label error rests
+on one trial.
 
 \section{Conclusion}\label{sec:conclusion}
 A learned pain-risk surrogate inherits the defects of its label pipeline and input construction,
 and held-out accuracy hides those that the test data share. Auditing one such pipeline against
-physics, instrumented knees and its own code found four defects that held-out testing had
-missed. Until the corrected baseline\pend{ (pending)} is validated in the same way, a load
-reduction found by optimizing the surrogate is a hypothesis to verify with physics.
+physics, instrumented knees and its own code found four defects. Retrained on quality-checked
+labels with the physical sign, the surrogate correlates positively with the implants but less well
+than its labels; on the optimizer's reference motion its seeds agree on the verdict but differ by
+up to 1.0~BW in load. A load reduction found by optimizing such a
+surrogate is a hypothesis to verify with physics.

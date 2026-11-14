@@ -151,6 +151,49 @@ def remove_pelvis_drift(pelvis_xyz, fs_hz=100.0, window_s=1.2, fit_s=0.5):
     mean = (cs[hi] - cs[lo]) / (hi - lo)[:, None]
     return x - mean
 
+
+# URDF link axes <-> OpenSim body axes: v_urdf = C_URDF @ v_opensim (x forward; URDF z up / y left, OpenSim y up / z right)
+C_URDF = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+
+
+def _rot(axis, ang):
+    """(..., 3, 3) rotation matrices about coordinate axis 0/1/2 by angles (...)."""
+    c, s = np.cos(ang), np.sin(ang)
+    R = np.zeros(np.shape(ang) + (3, 3))
+    i, j = [(1, 2), (2, 0), (0, 1)][axis]
+    R[..., axis, axis] = 1.0
+    R[..., i, i] = c; R[..., j, j] = c
+    R[..., i, j] = -s; R[..., j, i] = s
+    return R
+
+
+def urdf_pelvis_to_opensim(pelvis_rot_urdf):
+    """OpenSim pelvis_tilt / pelvis_list / pelvis_rotation from the Rajagopal2015.urdf pelvis rotation coordinates.
+
+    assets/Rajagopal2015.urdf (and OpenSai, which reads it literally) rotates the pelvis about the URDF's own z (up),
+    x (forward) and y (left) axes, in that order, for the joints it names pelvis_tilt, pelvis_list, pelvis_rotation.
+    OpenSim's pelvis_tilt / list / rotation rotate about ground z (right), x, y. Copying the three values across, as
+    the repo's converters used to, mis-orients the pelvis by up to ~13 deg on an optimizer trajectory (the copied
+    'pelvis_tilt' turns about the vertical). This re-expresses the same orientation, R_opensim = C^T Rz(a) Rx(b) Ry(c) C,
+    as OpenSim's body-fixed Z-X-Y angles. To first order: tilt = -c, list = b, rotation = a.
+
+    pelvis_rot_urdf : (..., 3) the URDF coordinates [pelvis_tilt, pelvis_list, pelvis_rotation] (URDF q3, q4, q5), rad.
+    Returns (..., 3) OpenSim [pelvis_tilt, pelvis_list, pelvis_rotation], rad. Pelvis translations are separate
+    (rotate the 3-vector to OpenSim ground axes; see docs/INFERENCE_GUIDE_MLP.md, *Coordinate frame*).
+    """
+    a = np.asarray(pelvis_rot_urdf, dtype=np.float64)
+    if a.shape[-1] != 3:
+        raise ValueError(f"pelvis_rot_urdf must be (..., 3); got {a.shape}")
+    Ru = _rot(2, a[..., 0]) @ _rot(0, a[..., 1]) @ _rot(1, a[..., 2])
+    R = C_URDF.T @ Ru @ C_URDF
+    # R = Rz(tilt) Rx(list) Ry(rotation): R[2,1] = sin(list), R[0,1] = -sin(tilt)cos(list), R[1,1] = cos(tilt)cos(list),
+    # R[2,0] = -cos(list)sin(rotation), R[2,2] = cos(list)cos(rotation)
+    lst = np.arcsin(np.clip(R[..., 2, 1], -1.0, 1.0))
+    tilt = np.arctan2(-R[..., 0, 1], R[..., 1, 1])
+    rot = np.arctan2(-R[..., 2, 0], R[..., 2, 2])
+    return np.stack([tilt, lst, rot], axis=-1)
+
+
 class JCFPostureSurrogate:
     """
     Loads the (q_inst, windowed positions, mass, height) MLP surrogate.

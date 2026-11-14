@@ -1,0 +1,5 @@
+window,n,d_pelvis_tilt_max_deg,d_pelvis_tilt_mean_abs_deg,d_pelvis_list_max_deg,d_pelvis_list_mean_abs_deg,d_pelvis_rotation_max_deg,d_pelvis_rotation_mean_abs_deg,urdf_com_vs_export_as_written_mean_m,urdf_com_vs_export_as_written_max_m,urdf_com_vs_export_converted_mean_m,urdf_com_vs_export_converted_max_m
+S1,80,12.9047,9.5690,0.7076,0.3783,6.9399,2.5479,0.0158,0.0191,0.0023,0.0038
+S2,65,10.7607,6.5083,0.4944,0.2072,9.1967,2.8396,0.0121,0.0173,0.0030,0.0044
+S1+S2,145,12.9047,8.1970,0.7076,0.3016,9.1967,2.6787,0.0142,0.0191,0.0026,0.0044
+all,645,12.9047,5.0622,0.7076,0.2115,11.3267,4.6837,0.0124,0.0191,0.0021,0.0049

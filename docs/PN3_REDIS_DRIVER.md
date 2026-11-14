@@ -134,7 +134,7 @@ Non-finite values are never written.
 | `::timestamp` | source time, s |
 | `::joint_names` | the 19 coordinates of `::q` (written once) |
 | `::q`, `::dq`, `::q_std` | joint positions, velocities and filter std, OpenSim convention (rad, m) |
-| `::q_urdf` (+ `::urdf_joint_names`) | 37-vector in `assets/Rajagopal2015.urdf` order; pelvis translation in the robot frame (x fwd, y left, z up), rotations copied, the convention of `infer_trajectory_csv.py` |
+| `::q_urdf` (+ `::urdf_joint_names`) | 37-vector in `assets/Rajagopal2015.urdf` order; pelvis translation in the robot frame (x fwd, y left, z up), rotations copied (the convention `infer_trajectory_csv.py` used before Nov 2026; it now converts them) |
 | `::joint_positions`, `::joint_velocities` | what OpenSai's SimViz reads for robot `pn3`: the same 37 joints in sai-model order (= URDF file order). Differences from `::q_urdf`: the pelvis rotations are re-expressed for the URDF's literal pelvis axes, so OpenSai renders the real pelvis orientation; translations are in the unscaled URDF's units; and `pelvis_tx` is wrapped with `--viz-wrap-m` |
 | `::pelvis_position`, `::com_position` | OpenSim ground frame (x fwd, y up, z right), m |
 | `::contact` | `[right, left]` 0/1 |
@@ -179,6 +179,7 @@ a wider check across held-out people is still to do.
 - **No pelvis translation on the treadmill.** Planted-foot anchoring turns treadmill walking into
   overground-equivalent progress (which is what the suit would see overground).
 - **URDF pelvis axes (for William).** `Rajagopal2015.urdf` keeps OpenSim's raw pelvis rotation axes in a z-up frame,
-  so the coordinate named `pelvis_tilt` rotates about the vertical. The repo's converters copy those three values
-  as OpenSim's. `::q` is OpenSim-correct; `::joint_positions` is correct for the URDF as OpenSai interprets it;
+  so the coordinate named `pelvis_tilt` rotates about the vertical. `pipeline/label_trajectory_csv.py` still copies
+  those three values as OpenSim's; `infer_trajectory_csv.py` converts them since Nov 2026
+  (`inference_posture_surrogate.urdf_pelvis_to_opensim`). `::q` is OpenSim-correct; `::joint_positions` is correct for the URDF as OpenSai interprets it;
   `::q_urdf` follows the existing copy convention until this is confirmed.

@@ -1,28 +1,27 @@
-% abstract.tex -- about 185 words. Audit numbers are final; surrogate results are \pend.
-% Sources: bias -0.63..-0.87 BW = stored labels vs implant medial force, physical sign
-%   (results/thesis/gc/pilot_AB_sojr/README.md, DM -0.627, JW -0.871); two surrogates (fpopt, sept,
-%   trained with the recipe [4] describes) r < 0 under the physical sign, plausible under the inverted
-%   one (same README; mx_sign/README.md section 5); 9,529 folders relabelled; 2.4-2.5x the in vivo
-%   walking peak in moving-COP trials (qc_final.md fix:so-diagnosis "Literature"); 36 of 40
-%   hand-picked peaks (fix:so-diagnosis sample); residual over-read on SC frames passing the rules
-%   (checks/sc_qc_overread.csv, qc_pass: total +0.88 BW, medial +0.28 BW); 25.4 % of right-knee
-%   pool stance time kept by the training mask keep_r, no 5 BW cap
-%   (results/thesis/labels_qc/label_masks/by_lab.csv, training walking pool); +-0.3 s warp (facts X01).
+% abstract.tex -- at most 180 words. Sources: thesis/PAPER_NUMBERS.md section 0 (headline facts).
+%   up to 0.87 BW = stored labels vs implant medial force, JW, physical sign (results/thesis/gc/audit_gc/
+%   summary.csv; DM's -0.63 at lag 0 is left out of the headline, audit_gc/README.md); 1.9x = median ratio of
+%   SO+JR to measured total-force maxima in all 30 covered stance windows (recomputed from audit_gc/frames.csv.gz
+%   and halves.csv, cover >= 0.9: 30/30 above, median 1.90); 36 of 40 peaks (qc_final.md fix:so-diagnosis);
+%   quality-checked frames still over-read in all three knees (audit_gc/qc_keep/summary.csv); +-0.3 s warp
+%   (facts X01), in vivo effect <= 0.03 BW (audit_gc_legacy_native vs audit_gc); corrected r 0.22-0.35 = 3-seed
+%   ensemble (qc_keep/summary.csv); equal pooled held-out MAE 0.43-0.44 (fmedial_eval/audit_test_qc, person
+%   means 0.48 / 0.63 / 0.52); seed spread on the reference motion max 1.02 BW, physical-sign verdicts
+%   (results/thesis/sep23/README.md); contact detection drives the Xsens difference (twente/audit_twente).
 \begin{abstract}
-A gait optimizer for knee osteoarthritis keeps a medial pain-risk proxy below a limit using a
-neural surrogate of musculoskeletal simulation. Such a model acts on people and must be
-trustworthy. We audited a recently proposed surrogate pipeline against static
-optimization with joint reaction analysis (SO+JR) and in vivo forces from three instrumented
-knees, and found four defects. The stored labels lacked the muscle forces and under-read implant
-medial force (bias $-0.63$ to $-0.87$ body weights, BW). The adduction-moment sign was inverted;
-two surrogates trained with the pipeline's recipe looked plausible only under it, and under the
-correct sign anti-correlate with implant medial force. Recomputed SO+JR labels exceed in vivo
-walking peaks 2.4- to 2.5-fold even with a moving centre of pressure. Fixed centres of pressure,
-unconverged optimization and dynamic inconsistency explain 36 of 40 hand-picked peaks above
-4~BW, but labels that pass our quality rules (25.4\% of stance time) still over-read the implants.
-Input windows were time-warped by up to 0.3~s. We also quantify sensitivity to proxy constants,
-inputs and training seed, and test a corrected baseline and a wearable path on real
-sensors\pend{ (pending)}.
+A knee-osteoarthritis gait optimizer keeps a medial pain-risk proxy below a limit with a neural
+surrogate of musculoskeletal simulation. We audited a recent pipeline against static
+optimization with joint reaction analysis (SO+JR) and three instrumented knees, finding four
+defects. Stored labels lacked the SO muscle forces and under-read implant medial force by up to
+0.87 body weights (BW). The adduction-moment sign was inverted; the pipeline's surrogates looked
+plausible only under it. SO+JR peaks are a median 1.9 times implant force; fixed centres of pressure,
+unconverged optimization and dynamic inconsistency explain 36 of 40 hand-picked peaks, but
+quality-checked labels still over-read. Input windows were time-warped by up to 0.3~s, mattering little
+in vivo. Retrained on quality-checked labels with the physical sign, the surrogate correlates weakly
+with the implants ($r = 0.22$--0.35), less than its labels. Seeds with equal pooled held-out
+error differ by up to 1.0~BW on the optimizer's reference motion, where corrected and legacy models
+fall on opposite sides of the limit under the physical sign. With real inertial sensors, contact
+detection drives most of the gap to optical input.
 \end{abstract}
 
 \begin{IEEEkeywords}

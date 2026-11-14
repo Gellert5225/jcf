@@ -8,14 +8,11 @@ the medial compartment~\cite{schipplein1991}. Instrumented implants measure knee
 vivo~\cite{kutzner2010,fregly2012}; with them, lowering KAM did not always lower medial
 force~\cite{walter2010}, static optimization under-predicted the first and over-predicted the
 second stance peak of medial force~\cite{kaneda2023}, and modelled medial force depended on the
-assumed contact locations~\cite{lerner2015}. Simulation best practice asks for residual checks,
-validation against measurement and sensitivity analysis~\cite{hicks2015}.
+assumed contact locations~\cite{lerner2015}.
 
 \textit{Learned surrogates.} Neural networks estimate medial and lateral knee contact force
 without ground reaction force (GRF) inputs~\cite{giarmatzis2020} and the KAM from wearable
-sensors~\cite{wang2020kam}. They are scored against the pipeline that produced their labels, so a
-defect shared by labels and test data stays hidden even under subject-wise
-testing~\cite{halilaj2018}. An optimizer that queries a learned objective drifts to inputs with
-falsely optimistic predictions; conservative objectives~\cite{trabucco2021} and model
-ensembles~\cite{kurutach2018} counter this. To our knowledge, no study has traced a surrogate
+sensors~\cite{wang2020kam}. They are scored against the pipeline that produced their labels,
+at best on held-out subjects~\cite{halilaj2018}. Conservative objectives~\cite{trabucco2021} and model ensembles~\cite{kurutach2018}
+counter an optimizer's drift toward falsely optimistic predictions. To our knowledge, no study has traced a surrogate
 used inside a gait optimizer back to the physics it claims and to in vivo measurement.

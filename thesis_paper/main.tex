@@ -1,5 +1,8 @@
 % main.tex -- ARSO 2027 submission (double-blind, 6 pages including references).
 % Build: pdflatex main && bibtex main && pdflatex main && pdflatex main
+% SUBMISSION PDF: build on Overleaf or a TeX Live with texlive-fonts-recommended (real Times embedded),
+% check <= 6 pages, and run it through IEEE PDF eXpress. The local main.pdf is a Computer Modern proof
+% (about 7 pages because CM is wider than Times) and must NOT be uploaded.
 % Local font fallback (must come before \documentclass). The local TeX Live lacks
 % texlive-fonts-recommended, so the Times, Helvetica and Courier metrics that IEEEtran
 % selects are missing and every glyph would be dropped. txfonts.sty ships with that
@@ -34,6 +37,8 @@
 \usepackage{cite}
 \usepackage{booktabs}
 \usepackage{xcolor}
+\usepackage{url}        % DOI in refs.bib breaks only at / and . (no hyphen inside the identifier)
+\urlstyle{same}
 % TikZ (pgf) is not installed in the local TeX Live (texlive-pictures missing), so it is
 % loaded only when present. Fig. 1 is drawn with the built-in picture environment and
 % does not need it. Do not use TikZ in the section files.
@@ -50,11 +55,7 @@
   \pdfsuppressptexinfo=-1
 \fi
 
-% Draft macros.
-% \pend{x}: a number that will be replaced after retraining or a pending experiment.
-% \todo{x}: missing content.
-\newcommand{\pend}[1]{\textcolor{blue}{#1}}
-\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+% Draft macros \pend and \todo were removed on 2026-11-10: every number is final.
 
 % Double-blind self-citation. [chong2026antalgic] (ISRR 2026, to appear) shares authors with this paper.
 % \anonselffalse (default): cite it in the third person, as "Chong et al.".
@@ -71,6 +72,8 @@
   \newcommand{\Chong}{Chong et al.}
   \newcommand{\citeChong}{\cite{chong2026antalgic}}
 \fi
+
+\hyphenation{Add-Bio-mech-an-ics}
 
 % Notation shared by all sections.
 \newcommand{\Fmed}{F_{\mathrm{medial}}}  % medial pain-risk proxy (BW)

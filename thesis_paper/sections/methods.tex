@@ -6,16 +6,19 @@
 %      1.712 m (M23); Rajagopal 37 DOF / 80 muscles (M02); SO settings (M04); reserves (M06);
 %      0.3 s buffer (M08); pool and test split (M11, M13, ISRR7); filters (M17, M18);
 %      inputs (M26-M30); architecture and loss (M31, M32, M34). Forward pass: our own timing,
-%      2026-11-10, fpopt checkpoint (235 inputs, 64,516 parameters), PyTorch 2.11, one thread,
+%      2026-11-10 (not printed since the trim), fpopt checkpoint (235 inputs, 64,516 parameters), PyTorch 2.11, one thread,
 %      Intel Core Ultra 9 285K, one query incl. standardisation, mean of 5,000 calls after 500
 %      warm-up calls: 0.068-0.071 ms in three repeats (M43's 0.08 ms is [4]'s own claim, not used).
+%      OpenSim version at labelling time is unverified, so no version number is printed.
 %      The audited checkpoints follow the recipe [4] describes (235 inputs, no pelvis translations,
 %      F_medial loss term). Which checkpoint the optimizer runs of [4] used is not confirmed
 %      (facts ISRR4: possibly mlp-grffree-base, 198 inputs with pelvis translations, plain MSE);
 %      TODO before submission: confirm with the first author of [4] which checkpoint produced
 %      its figures. Access: the labels, label/training/inference code, two checkpoints and the
 %      reference motion come from the authors of [4] (true because we are among them; check
-%      wording against ARSO's double-blind rule, see \anonselftrue in main.tex).
+%      wording against ARSO's double-blind rule, see \anonselftrue in main.tex). The trajectory
+%      converter (pipeline/label_trajectory_csv.py, added 2026-09-23) was written for this study, not
+%      by [4]; results.tex calls it 'the converter we used'.
 %   B: empty forces_file, OpenSim 4.5.2 behaviour, vasti check, relabel of 9,529 folders
 %      (gc/pilot_AB_sojr/README.md "OpenSim label sources"; qc_final.md fix:label-qc,
 %      fix:train-plumbing); reference motion has jcf_output_sojr (lead, 2026-11-10);
@@ -31,19 +34,19 @@ medial compartment load of a frontal-plane knee model~\cite{schipplein1991},
   \Fmed = \phi\,\Fjcf + \Madd/d ,
 \end{equation}
 with $\Fjcf$ the compressive tibiofemoral force, $\Madd$ the adduction moment (positive when
-it loads the medial compartment), $\phi$ the medial share of $\Fjcf$ at $\Madd = 0$, and $d$
-the distance between the compartment centres. Both loads come from an OpenSim JR analysis of
-the knee, reported on the tibia in the tibial frame: $\Fjcf = |F_y|$ and $\Madd = s\,M_x$,
-where the sign $s$ is audited in D2. With forces in BW ($mg$, mass $m$) and $M_x$ in
-BW$\cdot H$ (height $H$), $\Fmed = \phi|F_y| + s M_x H/d$ in BW. Nominally $\phi = 0.5$,
+loading the medial compartment), $\phi$ the medial share of $\Fjcf$ at $\Madd = 0$, and $d$
+the distance between the compartment centres. Both loads come from an OpenSim JR analysis,
+reported on the tibia in the tibial frame: $\Fjcf = |F_y|$ and $\Madd = s\,M_x$,
+where the sign $s$ is audited in D2. With forces in BW and $M_x$ in BW$\cdot H$ (height $H$),
+$\Fmed = \phi|F_y| + s M_x H/d$ in BW. Nominally $\phi = 0.5$,
 $d = 0.045$~m and the limit is 1.4~BW~\citeChong{}; at the median pool height of
-1.712~m, $H/d \approx 38$, so moment errors enter $\Fmed$ 38-fold.
+1.712~m, $H/d \approx 38$ amplifies moment errors.
 
 \textit{Labels.} From AddBiomechanics~\cite{werling2024} the pipeline takes the kinematics, GRF
 and centres of pressure (COP) and the scaled Rajagopal model~\cite{rajagopal2016} (37 degrees of
 freedom, 80 muscles). SO minimizes summed squared activations (coordinates filtered at 6~Hz, at
 most 200 iterations, reserve actuators on all unconstrained coordinates). The training pool holds
-7,991 walking trials of 82 people from four labs: Carter~\cite{carter2024}, Moore~\cite{moore2015}, Tiziana~\cite{lencioni2019} and
+7,991 walking trials of 82 people from four labs: Carter~\cite{carter2024}, Moore~\cite{moore2015}, Lencioni~\cite{lencioni2019} and
 Falisse~\cite{falisse2017}. The test split has one person from each of six labs (676 walking
 trials), adding Fregly (Grand Challenge subject SC) and Han~\cite{han2023}, labs that supply no
 training data. Trials are dropped if the resultant knee force exceeds 6~BW or $|M_x|$ exceeds
@@ -56,53 +59,47 @@ $k+9$, the whole-body centre of mass and a point on each calcaneus relative to t
 ground axes, and right and left contact flags (vertical GRF above 0.05~BW); and mass and height.
 It takes no GRF and no pelvis translation. The foot point is the calcaneus origin or the
 optimizer's foot point, $(0.13,-0.01,0)$~m in calcaneus axes. Three hidden layers of 128 units
-(64,516 parameters) are trained with Adam on a squared-error loss that includes 0.5 times the
-error of $\Fmed$ from \eqref{eq:fmedial}. One query takes about 0.07~ms on one CPU thread in
-our timing. We audited two checkpoints trained with this recipe, one per foot point (`legacy').
+are trained with Adam on a squared-error loss that includes 0.5 times the error of $\Fmed$ from
+\eqref{eq:fmedial}. We audited two checkpoints trained with this recipe, one per foot point (`legacy').
 The stored labels, the label, training and inference code, these checkpoints and the optimizer's
-reference motion were obtained from the authors of~\citeChong{}; the optimizer was not.
+reference motion were made available by the authors of~\citeChong{}; the optimizer was not.
 
 \subsection{Audit Checks}\label{sec:audit}
-\textit{D1, label provenance.} The stored labels came from one OpenSim 4.5.2 AnalyzeTool that
-ran SO and JR with an empty forces file. JR then computes the muscle forces from the model
-states instead of applying the SO solution. We compared the stored knee force with the SO force
-of the vasti alone, and reran JR with the SO forces for all 9,529 labelled folders (training and
-test, walking and static) and for the optimizer's reference motion. These SO+JR labels share the
-SO solution and time grid of the stored labels.
+\textit{D1, label provenance.} The stored labels came from one OpenSim AnalyzeTool that ran SO
+and JR with an empty forces file. JR then computes the muscle forces from the model states
+instead of applying the SO solution. We compared the stored knee force with the SO force of the
+vasti alone, and reran JR with the SO forces for all 9,529 labelled trials and for the
+optimizer's reference motion, keeping the SO solution and time grid of the stored labels.
 
 \textit{D2, moment sign.} JR reports the load on the tibia at the knee centre in the tibial
 frame, whose $z$ axis points to the subject's right on both legs. We tested which $s$ makes
-$\Madd$ medial-positive in three ways: two-point contact algebra (a compressive condyle force
-$f$ at $z_c$ gives $M_x = z_c f$); the $z$ positions of the medial and lateral knee-muscle
-points in one scaled model per lab; and a least-squares fit
-$M_x = aF_{\mathrm{med}} + bF_{\mathrm{lat}} + c$ on the released SO+JR results of Kaneda et
-al.~\cite{kaneda2023}, which give the tibial load and both condyle forces of the Grand Challenge
-subjects in one table.
+$\Madd$ medial-positive in three ways: contact algebra (a compressive condyle force $f$ at
+$z_c$ gives $M_x = z_c f$), the $z$ positions of the medial and lateral knee-muscle points in one
+scaled model per lab, and a fit $M_x = aF_{\mathrm{med}} + bF_{\mathrm{lat}} + c$ on Kaneda et al.'s
+released SO+JR results~\cite{kaneda2023}, which include both condyle forces.
 
 \textit{D3, SO label quality.} Rules on the SO and JR outputs (Table~\ref{tab:qc}) target three
 defects. \emph{Fixed COP}: the right foot's COP moves slower than 0.2~m/s in gait stance, so its
 GRF acts at a point fixed in the lab. \emph{Unconverged SO}: at sampled stance frames we re-solved
-SO's convex problem with the same moment arms, capacities and net moments; a stored cost above
-1.1 times the optimum marks a non-optimal frame. Frame-level proxies are saturation, reserves,
+SO's convex problem from the stored moment arms and net moments; a stored cost above 1.1 times
+the optimum marks a non-optimal frame. Frame-level proxies are saturation, reserves,
 co-activation and activation jumps. \emph{Dynamic inconsistency}: a pelvis residual moment above
-5\% of peak GRF times pelvis height. A 5~BW flag on $|F_y|$ is reported but not applied.
-Shares are of right-knee stance time, weighted by time as on the 100~Hz training grid. We also classified 40 hand-picked SO+JR peaks above
-4~BW by the mechanism at the peak frame.
+5\% of peak GRF times pelvis height. We also classified the mechanism of 40 hand-picked SO+JR
+peaks above 4~BW.
 
 \textit{D4, input construction.} We compared the time grids on which the legacy feature builder
 places position windows, joint angles, flags and labels, and the time spanned by a window.
 
 \textit{In vivo comparison.} The Knee Grand Challenge~\cite{fregly2012} provides implant forces
-of subjects JW and DM (right knee) and SC (left knee), none used to train the legacy surrogates.
+of subjects JW and DM (right knee) and SC (left knee), none used in training.
 We matched 138 AddBiomechanics segments to Grand Challenge trials by cross-correlating vertical
-GRF ($r \ge 0.98$, amplitude ratio 0.9--1.1), took medial force from each dataset's implant
-regression, and scored instrumented-limb stance frames inside the JR window at 100~Hz. The
-surrogates received deployment-style inputs (exact time alignment, 20 frames at 100~Hz), not the
-warped windows of their training (D4). For SC, JR used the left knee and the surrogate inputs
-were mirrored. Peaks were scored in stance windows
-at 5--45\% and 55--95\%. As a reference, we scored the released SO+JR of Kaneda et
-al.~\cite{kaneda2023} on SC's frames. DM's implant timing is
-suspect (heel strike to measured first peak takes 95~ms longer than in gait-matched stances of
-JW and SC), so DM results are conditional.
+GRF ($r \ge 0.98$, amplitude ratio 0.9--1.1), took the supplied medial force (JW: sum of the
+medial load cells), and scored instrumented-limb stance frames inside the JR window at 100~Hz.
+The surrogates received aligned 100~Hz inputs. For
+SC, JR used the left knee and the surrogate inputs were mirrored. Peaks were scored in stance
+windows at 5--45\% and 55--95\%. We also scored Kaneda et al.'s released
+SO+JR~\cite{kaneda2023} on SC. DM's implant timing is
+suspect (heel strike to measured first peak takes 95~ms longer than in gait-matched JW and SC
+stances), so DM results are conditional.
 
 \input{sections/methods_def}

@@ -1,0 +1,38 @@
+{
+ "date": "2026-11-10 18:12",
+ "n_runs": 120,
+ "wall_s": 45.65453624725342,
+ "ckpts": {
+  "qc_s1": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_fmW0p5_e100_s1.pt",
+  "qc_s2": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_fmW0p5_e100_s2.pt",
+  "qc_s3": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_fmW0p5_e100_s3.pt",
+  "qc_origin": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc_fmW0p5_e100_s1.pt",
+  "fpopt_legacy": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt",
+  "sept_legacy": "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_w20_fmW0p5_e100_2.pt"
+ },
+ "trials": {
+  "carter_P010_t10": {
+   "trial": "jcf/full_duration/testing/walking/carter_P010_split0_t10",
+   "height": 1.7,
+   "mass": 54.0
+  },
+  "moore_s10_t55r02": {
+   "trial": "jcf/full_duration/testing/walking/moore_subject10_t55_r02",
+   "height": 1.77,
+   "mass": 90.7
+  }
+ },
+ "takes": {
+  "carter_P010_t10_clean": "results/thesis/pn3_sim/takes/carter_P010_t10_clean",
+  "carter_P010_t10_noise1deg": "results/imu/driver_demo/take_P010_t10_noise1deg",
+  "carter_P010_t10_noise2deg": "results/thesis/pn3_sim/takes/carter_P010_t10_noise2deg",
+  "carter_P010_t10_noise1deg_drift0p5": "results/thesis/pn3_sim/takes/carter_P010_t10_noise1deg_drift0p5",
+  "moore_s10_t55r02_clean": "results/thesis/pn3_sim/takes/moore_s10_t55r02_clean",
+  "moore_s10_t55r02_noise1deg": "results/thesis/pn3_sim/takes/moore_s10_t55r02_noise1deg",
+  "moore_s10_t55r02_noise2deg": "results/thesis/pn3_sim/takes/moore_s10_t55r02_noise2deg",
+  "moore_s10_t55r02_noise1deg_drift0p5": "results/thesis/pn3_sim/takes/moore_s10_t55r02_noise1deg_drift0p5"
+ },
+ "label_subdir": "jcf_output_sojr",
+ "mx_sign": -1.0,
+ "work": "/tmp/claude-1000/-home-gellert-Developer-medical-dt/187d5d35-6c3c-4c5e-8d5a-f69463aa63f9/scratchpad/pn3sim/work"
+}

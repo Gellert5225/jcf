@@ -7,11 +7,11 @@
 %   kaneda2023         (PMC10231980; J Biomech 152:111569)
 % IEEEtran.bst does not print the doi field; DOIs are kept for traceability.
 
-% Limits long author lists to "first author et al." style (IEEE allows et al. for > 6 authors).
+% Lists of more than six authors print as "first author et al." (IEEE style).
 @IEEEtranBSTCTL{IEEEexample:BSTcontrol,
   CTLuse_forced_etal       = "yes",
   CTLmax_names_forced_etal = "6",
-  CTLnames_show_etal       = "3"
+  CTLnames_show_etal       = "1"
 }
 
 % ---------------------------------------------------------------------------
@@ -316,7 +316,7 @@
   pages   = {e11},
   year    = {2023},
   doi     = {10.1017/wtc.2023.7},
-  note    = {{D}ataset on Zenodo, doi: 10.5281/zenodo.6457662}
+  note    = {{D}ataset on Zenodo, doi: \url{10.5281/zenodo.6457662}}
 }
 
 % ---------------------------------------------------------------------------

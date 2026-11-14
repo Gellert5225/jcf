@@ -1,0 +1,4 @@
+trial,single_stance_frames,cop_speed_r_mps,keep_r_share,cop_in_calcn_x_min_m,cop_in_calcn_x_p05_m,cop_in_calcn_x_p95_m,cop_in_calcn_x_max_m
+moore_subject15_t10_r00,34,0.5077,0.5833,0.1036,0.1037,0.1624,0.1631
+moore_subject5_t35_r01,47,0.5351,0.2889,0.0962,0.0985,0.2066,0.2104
+moore_subject15_t53_r00,41,1.1754,0.4648,0.0926,0.1049,0.2182,0.2216

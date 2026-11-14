@@ -6,13 +6,20 @@ pelvis_position_{0,1,2}, right/left_foot_position_{0,1,2}, right/left_foot_wrenc
 The CSV is assumed to be in robot frame (x-forward, y-left, z-up) with q ordered
 [tx, ty, tz, tilt, list, rot, ...]. The model expects OpenSim ground frame
 (x-forward, y-up, z-right) and q ordered [tilt, list, rot, tx, ty, tz, ...].
+
+Pelvis angles (Nov 2026): the URDF's three pelvis rotation coordinates turn about the URDF's own z (up), x and y axes,
+not OpenSim's, so they are converted with inference_posture_surrogate.urdf_pelvis_to_opensim. Earlier versions of this
+script copied them (up to ~13 deg of pelvis error on the Sep 23 trajectory); --copy-pelvis-angles reproduces that.
+
+f_medial uses the sign stored in the checkpoint (-mx for the *_sojrqc checkpoints, +mx for older ones; see
+docs/INFERENCE_GUIDE_MLP.md, *M_x sign*). --out-csv writes the per-frame prediction of the converted inputs.
 """
 import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from inference_posture_surrogate import JCFPostureSurrogate
+from inference_posture_surrogate import JCFPostureSurrogate, urdf_pelvis_to_opensim
 
 # Rajagopal2015 URDF q indices (revolute+prismatic only, in URDF order)
 URDF_Q = {
@@ -52,6 +59,10 @@ def main():
     ap.add_argument("--mass", type=float, default=70.0, help="kg")
     ap.add_argument("--height", type=float, default=1.75, help="m")
     ap.add_argument("--out", default="./f_medial_trajectory.png")
+    ap.add_argument("--out-csv", default=None, help="per-frame time, fy, mx, mx_medial, f_medial (converted inputs)")
+    ap.add_argument("--copy-pelvis-angles", action="store_true",
+                    help="copy the URDF pelvis rotation coordinates as OpenSim angles (pre-Nov-2026 behaviour, "
+                         "wrong; only to reproduce old numbers)")
     args = ap.parse_args()
 
     df = pd.read_csv(args.csv).dropna(subset=["com_position_0"]).reset_index(drop=True)
@@ -62,6 +73,13 @@ def main():
     q16_raw = q_full[:, MODEL_Q_IDX].copy()                   # before rotation
     q16_rot = q_full[:, MODEL_Q_IDX].copy()
     q16_rot[:, 3:6] = to_opensim(q16_rot[:, 3:6])
+    if not args.copy_pelvis_angles:
+        conv = urdf_pelvis_to_opensim(q16_rot[:, 0:3])
+        print(f"Pelvis angles converted from URDF to OpenSim axes (max change "
+              f"{np.degrees(np.abs(conv - q16_rot[:, 0:3]).max(axis=0)).round(1)} deg for tilt/list/rotation)")
+        q16_rot[:, 0:3] = conv
+    else:
+        print("Pelvis angles copied unchanged (--copy-pelvis-angles)")
 
     # Peek at the checkpoint to see which variant it is.
     # (Cheaper than constructing the model just to check the flags.)
@@ -119,7 +137,7 @@ def main():
 
     model = JCFPostureSurrogate(args.ckpt)
     print(f"\nLoaded checkpoint (epoch={model.epoch+1}, val_loss={model.val_loss:.4f}, "
-          f"activation={model.activation})")
+          f"activation={model.activation}, mx_medial_sign={model.mx_medial_sign:+g})")
 
     def run(q16, com_rel, rf_rel, lf_rel):
         q_center = q16[center : center + n_win].copy()
@@ -154,6 +172,11 @@ def main():
     print(f"\nSummary (mass={args.mass} kg, height={args.height} m):")
     summarize("RAW (no rotate)", pred_raw)
     summarize("OpenSim rotated", pred_rot)
+    if args.out_csv:
+        pd.DataFrame({"time": t_center, "fy": pred_rot["fy"], "mx": pred_rot["mx"],
+                      "mx_medial": pred_rot["mx_medial"], "f_medial": pred_rot["f_medial"]}).to_csv(
+            args.out_csv, index=False)
+        print(f"Saved per-frame prediction to {args.out_csv}")
 
     fig, ax = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True)
     ax[0].plot(t_center, pred_raw["f_medial"], label="F_medial — RAW robot frame", color="tab:orange", alpha=0.85)

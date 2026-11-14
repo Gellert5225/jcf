@@ -1,0 +1,14 @@
+trial,lab,frames,origin_r_max_err_m,fpopt_r_max_err_m,origin_l_max_err_m,fpopt_l_max_err_m
+carter_P022_split0_t05,carter,2000,5.956e-08,5.955e-08,5.960e-08,5.953e-08
+carter_P044_split0_t33,carter,2000,5.958e-08,5.944e-08,5.923e-08,5.958e-08
+carter_P035_split0_t18,carter,2000,2.977e-08,5.953e-08,2.979e-08,5.904e-08
+falisse_subject_2_t09,falisse,181,2.879e-08,2.890e-08,2.979e-08,2.975e-08
+falisse_subject_2_t02,falisse,107,5.955e-08,5.943e-08,2.957e-08,2.941e-08
+fregly_1GC_t00_r01,fregly,111,5.827e-08,5.887e-08,2.890e-08,2.911e-08
+fregly_1GC_t03_r00,fregly,97,5.836e-08,5.868e-08,2.964e-08,2.971e-08
+han_s006_split1_t06,han,502,5.843e-08,5.902e-08,2.977e-08,2.973e-08
+han_s004_split4_t00_r00,han,179,5.936e-08,5.925e-08,5.957e-08,5.949e-08
+moore_subject3_t13_r10,moore,90,1.478e-08,1.415e-08,2.127e-08,1.441e-08
+moore_subject5_t27_r08,moore,169,2.839e-08,2.846e-08,2.239e-08,2.837e-08
+tiziana_Subject49_t05,tiziana,67,7.331e-09,9.503e-09,2.892e-08,2.965e-08
+tiziana_Subject44_t09,tiziana,65,2.966e-08,2.921e-08,5.569e-08,5.827e-08

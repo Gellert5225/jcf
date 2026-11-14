@@ -2,7 +2,7 @@
 % Input on the last line of methods.tex. Labels: sec:sens, sec:corrected, sec:wearable.
 % Sources: S1 grid and limit (A1-1, A1-3); 1.3 cm pelvis lift, joints fixed (M36, PS6, PS7);
 %   foot points (M29); S3 deployment form 20 frames at 100 Hz (A3-34); reference motion 6.45 s at
-%   100 Hz (GT6); > 5 muscles saturated in 40.8 % of frames, borrowed scaled model (GT5, M47).
+%   100 Hz (GT6); its SO+JR labels are unusable (label_mask keeps 0 right-knee frames; sep23/README).
 %   Corrected baseline = user decision (a)/(b), 2026-11-10. Training set = train_mlp *_sojrqc input
 %   sets: keep_r of <trial>/jcf_output_sojr/label_mask.npz (fixed right-foot COP trials, then the six
 %   SO/dynamics frame rules; the 5 BW flag is stored, NOT applied), carried to the 100 Hz grid with
@@ -12,9 +12,11 @@
 %   legacy trial filters (6 BW, 0.15 BW*H) would drop 86 % of the kept training frames
 %   (label_masks/dry_build_fpopt/trial_filters.csv), so the corrected runs switch them off
 %   (--max-peak 1e9 --max-moment 1e9); keep in sync with the training commands.
-%   S2 pelvis lift: the numbers are [4]'s own (paper/author.tex, "lifting the pelvis by 1.3 cm with
-%   the stance foot planted"), cited as such in results.tex; we repeat the test on the corrected
-%   baseline only.
+%   Lencioni = the lab that earlier drafts called 'Tiziana' (data folder name). S2 pelvis lift: the numbers are [4]'s own, cited as such in results.tex; we did not repeat the
+%   test (no checkpoint was lift-tested). S2 pelvis-angle conversion and S4: results/thesis/sep23
+%   (converted pelvis angles are the primary inputs). S3: legacy in vivo, audit_gc_legacy_native vs
+%   audit_gc. Seed 2 best epoch 8 (1-based), val 0.363; seeds 1/3 0.300/0.305 (sep23/README.md).
+%   Simulated suit: two held-out trials, noise 0/1/2 deg and 1 deg + 0.5 deg/s drift (pn3_sim/README).
 %   Wearable: A3-01..A3-03, A3-05, A3-22..A3-25, A3-29..A3-34, A3-39, A3-41, A3-07, A3-08;
 %   Wang et al. data: results/thesis/twente/EXPLORE_NOTES.md sections 1-6 (9 people, 54 treadmill
 %   trials at 0.25-1.50 m/s, 8 sensors, optical IK, treadmill force, separate static pose, no
@@ -22,25 +24,23 @@
 \subsection{Sensitivity Protocol}\label{sec:sens}
 \textit{S1, constants.} We recompute $\Fmed$ for $\phi \in \{0.4, 0.5, 0.6\}$ and
 $d \in \{40, 45, 50\}$~mm, with the limit at 1.4~BW, and report the mean absolute error (MAE) and
-the recall and precision of limit crossings. \textit{S2, inputs.} We lift the pelvis
-by 1.3~cm with the stance foot planted, as \Chong{}~\citeChong{} did, and swap the foot points.
-\textit{S3, alignment.} Models are scored on training-style and on aligned 100~Hz inputs, as the
-optimizer and the IMU driver supply. \textit{S4, training run.} Models that differ only in the
-seed are scored on the test split and on the optimizer's reference
-motion~\citeChong{} (6.45~s), labelled with SO+JR. Its labels are indicative: the
-motion is far out of distribution, uses a borrowed scaled model, and has more than five muscles
-saturated in 40.8\% of its frames.
+the recall and precision of limit crossings. \textit{S2, inputs.} We swap the foot points and, on
+the reference motion, compare two pelvis-angle conventions. \textit{S3, alignment.} Legacy models
+are scored in vivo on training-style and on aligned 100~Hz inputs, as the optimizer and IMU
+driver supply. \textit{S4, training run.} Models differing only in initialization seed are
+scored on the test split, in vivo, and on the optimizer's reference motion~\citeChong{},
+which lacks usable labels.
 
 \subsection{Corrected Baseline}\label{sec:corrected}
 The corrected baseline keeps the legacy architecture and recipe but (i)~uses SO+JR labels,
-(ii)~uses the physical sign in the $\Fmed$ loss and stores the convention in the checkpoint,
-(iii)~builds inputs and labels on the exact JR time grid resampled to 100~Hz, so a window spans
-200~ms as in deployment, and (iv)~trains only on frames that pass the quality rules: fixed-COP
-trials are dropped, then frames that an SO or dynamics rule flags, which keeps 25.4\% of the
-pool's right-knee stance time (a 100~Hz frame passes when at most 5\% of its interpolated label
-comes from flagged frames); they replace the legacy trial filters on peak force and moment. Three seeds use the optimizer's foot
-point and one run the calcaneus origin. Legacy checkpoints keep their original formula, so that
-earlier optimizer results stay reproducible.
+(ii)~uses the physical sign in the $\Fmed$ loss and stores it in the checkpoint, (iii)~builds
+inputs and labels on the JR time grid resampled to 100~Hz, so a window spans 200~ms as in
+deployment, and (iv)~trains only on frames that pass the quality rules (Table~\ref{tab:qc}),
+which replace the legacy trial filters; a 100~Hz frame passes when at most 5\% of its
+interpolated label comes from flagged frames. Seeds 1--3 use the optimizer's foot point and one
+run (seed~1) the calcaneus origin, all on one person split. Seed~2 reached its best validation
+loss at epoch~8 (0.363, against 0.300 and 0.305); we keep it. Legacy checkpoints keep their
+formula, so results computed with them stay reproducible.
 
 \subsection{Wearable Path}\label{sec:wearable}
 A Perception Neuron~3 suit streams fused orientations of 8 sensors (pelvis, torso, thighs,
@@ -49,14 +49,14 @@ Kalman filter (UKF)~\cite{julier2004unscented} with $2\times38$ cubature
 points~\cite{arasaratnam2009cubature} estimates 19 coordinates of a height-scaled Rajagopal model
 and their velocities from orientation residuals ($\sigma = 2^\circ$), and legged
 odometry~\cite{bloesch2012state} holds each planted foot ($\sigma = 1.5$~cm). Hysteresis detectors
-on foot angular speed~\cite{skog2010zero} set the contact flags. They switch on at foot flat,
-about 90~ms after heel strike, so each onset is back-dated by up to 0.2~s to the speed minimum
-at initial contact. A 20-frame, 100~Hz window feeds the surrogate, so predictions lag by 90~ms;
-estimates and loads go over Redis to a robotics visualizer for display.
+on foot angular speed~\cite{skog2010zero} set the contact flags; as they switch on at foot flat,
+about 90~ms after heel strike, each onset is back-dated by up to 0.2~s to the speed minimum at
+initial contact. A 20-frame, 100~Hz window feeds the surrogate (90~ms lag); results go over Redis
+to a visualizer.
 
-We test the path on a simulated suit (body orientations from held-out kinematics with
-autoregressive noise of 0--2$^\circ$ and heading drift) and on the real Xsens recordings of Wang
-et al.~\cite{wang2023twente}: 9 people, 54 treadmill trials at 0.25--1.50~m/s, 8 sensors on the
-same bodies as the suit, with optical motion capture and treadmill force. Calibration uses a
-separate static pose. As the data have no knee-load labels, the IMU path is scored against
-optical inverse kinematics (IK) and against the same surrogate run on optical kinematics.
+We test the path on a simulated suit (orientations from two held-out trials with 0, 1 and
+2$^\circ$ noise, and 1$^\circ$ with 0.5$^\circ$/s heading drift) and on the Xsens recordings of
+Wang et al.~\cite{wang2023twente}: 9 people, 54 treadmill trials at 0.25--1.50~m/s, 8 sensors at
+the suit's locations, optical motion capture, treadmill force and a separate static calibration
+pose. Lacking knee-load labels, we score the IMU path against optical inverse kinematics (IK) and
+against the same surrogate run on optical kinematics.
