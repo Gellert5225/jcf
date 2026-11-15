@@ -1061,7 +1061,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
           max_peak_bw=None, seed=SEED, input_set='full', dq_method='central',
           epochs=None, lr_patience=None, fmedial_weight=0.0, activation='relu',
           dropout=None, init_seed=None, max_moment_bwh=None, flat_cv=FLAT_CV, flat_dr=FLAT_DR,
-          flat_label_subdir=None, allow_partial_labels=False):
+          flat_label_subdir=None, allow_partial_labels=False, mx_sign_override=None, fmedial_loss="combined"):
     """
     Train MLP on per-frame data from one or both activities.
       activity='static':  ./jcf/full_duration/training/static/  (for posture optimization)
@@ -1082,6 +1082,12 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
       hold a non-finite value is always dropped (before the split).
       allow_partial_labels: by default a run stops when some folders have the stored jcf_output/ labels but none in
       the input set's label folder (unfinished or partly failed relabel); True trains on the folders that have them.
+      mx_sign_override: 'physical' (-mx) or 'pipeline' (+mx) for the F_medial loss term instead of the input set's
+      own sign (sign ablations); stored in the checkpoint like any sign, and a run whose sign differs from the set's
+      default gets _mxplus / _mxminus in its file name.
+      fmedial_loss: 'combined' (default) = MSE of F_medial = 0.5|F_y| + s*M_x*H/d; 'signfree' = the same expansion
+      without the sign-carrying cross term, 0.25*(|F_y| - |F_y_true|)^2 + ((M_x - M_x_true)*H/d)^2, i.e. per-output
+      errors with M_x weighted at the scale it enters F_medial (weight fmedial_weight; file name gets _sf).
     """
     _call_args = dict(locals())          # every train() argument, defaults included (provenance)
     filters_given = (max_peak_bw is not None, max_moment_bwh is not None)
@@ -1100,6 +1106,18 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
     label_subdir = label_cfg["label_subdir"]
     label_mask = label_cfg["label_mask"]
     mx_sign = mx_medial_sign_of(INPUT_SETS[input_set])
+    if fmedial_loss not in ("combined", "signfree"):
+        raise ValueError("fmedial_loss must be 'combined' or 'signfree'")
+    mx_sign_suffix = ""
+    if mx_sign_override is not None:
+        if mx_sign_override not in MX_CONVENTIONS:
+            raise ValueError(f"mx_sign_override must be one of {sorted(MX_CONVENTIONS)}")
+        if MX_CONVENTIONS[mx_sign_override] != mx_sign:
+            mx_sign_suffix = "_mxplus" if MX_CONVENTIONS[mx_sign_override] > 0 else "_mxminus"
+        mx_sign = MX_CONVENTIONS[mx_sign_override]
+        if fmedial_weight <= 0:
+            print("WARNING: --mx-sign has no effect without --fmedial-weight > 0 (the sign only enters the F_medial "
+                  "loss term)")
     print(f"Labels: {label_subdir}/BatchJCF_JointReaction_ReactionLoads.sto; trial filters: resultant peak <= "
           f"{max_peak_bw:g} BW, |M_x| <= {max_moment_bwh:g} BW*H, non-finite labels dropped, "
           + (f"flat filter on walking (drop CV < {flat_cv:g} or range < {flat_dr:g} BW of the "
@@ -1116,7 +1134,10 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
               + (f" ({', '.join(given)} given)" if given else
                  f" (default {MASKED_MAX_PEAK_BW:g} / {MASKED_MAX_MOMENT_BWH:g} for label-mask sets: the frame mask "
                  "replaces them)"))
-    if fmedial_weight > 0:
+    if fmedial_weight > 0 and fmedial_loss == "signfree":
+        print(f"F_medial loss (sign-free, weight {fmedial_weight:g}): 0.25*(|F_y|-|F_y_true|)^2 + "
+              f"((M_x-M_x_true)*H/0.045)^2; checkpoint sign for inference {mx_sign:+g}")
+    elif fmedial_weight > 0:
         print(f"F_medial loss: 0.5*|F_y| + ({mx_sign:+g})*M_x*H/0.045, M_x = raw walker_knee_r mx / (BW*H) ("
               + ("physical medial sign)" if mx_sign == MX_SIGN_PHYSICAL else
                  "legacy pipeline sign; physically the medial moment is -mx at walker_knee_r)"))
@@ -1375,9 +1396,14 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
             H = inp[:, -1] * height_std_t + height_mean_t                  # [B]
             fy_p, mx_p = pred[:, 1], pred[:, 3]
             fy_t, mx_t = target[:, 1], target[:, 3]
-            fm_p = fmedial_term(fy_p, mx_p, H, mx_sign, ALPHA_FMEDIAL, D_M_FMEDIAL)
-            fm_t = fmedial_term(fy_t, mx_t, H, mx_sign, ALPHA_FMEDIAL, D_M_FMEDIAL)
-            fm_loss = ((fm_p - fm_t) ** 2).mean()
+            if fmedial_loss == "signfree":
+                # per-output terms of the F_medial error without its sign-carrying cross term
+                fm_loss = ((ALPHA_FMEDIAL * (torch.abs(fy_p) - torch.abs(fy_t))) ** 2
+                           + ((mx_p - mx_t) * H / D_M_FMEDIAL) ** 2).mean()
+            else:
+                fm_p = fmedial_term(fy_p, mx_p, H, mx_sign, ALPHA_FMEDIAL, D_M_FMEDIAL)
+                fm_t = fmedial_term(fy_t, mx_t, H, mx_sign, ALPHA_FMEDIAL, D_M_FMEDIAL)
+                fm_loss = ((fm_p - fm_t) ** 2).mean()
             total = total + fmedial_weight * fm_loss
         return total
 
@@ -1434,9 +1460,10 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
             if fmedial_weight > 0:
                 # e.g. fmW2 for fmedial_weight=2.0
                 w = ("%g" % fmedial_weight).replace(".", "p")
-                suffix += f"_fmW{w}"
+                suffix += f"_fmW{w}" + ("_sf" if fmedial_loss == "signfree" else "")
             if activation != 'relu':
                 suffix += f"_{activation}"
+            suffix += mx_sign_suffix
             if tag:
                 suffix += f"_{tag}"
             ckpt_name = f"best_model_mlp_{activity}{suffix}.pt"
@@ -1455,6 +1482,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 "input_set": input_set,
                 "dq_method": dq_method,
                 "fmedial_weight": fmedial_weight,
+                "fmedial_loss": fmedial_loss,
                 "activation": activation,
                 "base_indices": INPUT_SETS[input_set]["base_indices"],
                 "include_height": INPUT_SETS[input_set]["include_height"],
@@ -1570,6 +1598,14 @@ if __name__ == "__main__":
                    help="Extra labelled trial dirs reported as a separate 'ext-val' loss each epoch.")
     p.add_argument("--lr", type=float, default=None,
                    help=f"Learning rate (default {LEARNING_RATE}); use ~1e-4 when fine-tuning.")
+    p.add_argument("--fmedial-loss", choices=["combined", "signfree"], default="combined",
+                   help="combined: MSE of F_medial = 0.5|F_y| + s*M_x*H/d (default). signfree: "
+                        "0.25*(|F_y|-|F_y_true|)^2 + ((M_x-M_x_true)*H/d)^2, the same terms without the sign-carrying "
+                        "cross term (file name gets _sf).")
+    p.add_argument("--mx-sign", choices=sorted(MX_CONVENTIONS), default=None,
+                   help="Moment sign in the F_medial loss term, overriding the input set's: physical = -mx (the "
+                        "medial moment at walker_knee_r), pipeline = +mx (ISRR 2026). For sign ablations; a run whose "
+                        "sign differs from the set's default gets _mxplus / _mxminus in its file name.")
     p.add_argument("--tag", type=str, default=None,
                    help="Suffix appended to the checkpoint name (e.g. ft_sep23) so the base run is not overwritten.")
     args = p.parse_args()
@@ -1588,4 +1624,4 @@ if __name__ == "__main__":
           dropout=args.dropout,
           init_from=args.init_from, extra_dirs=args.extra_dirs,
           extra_weight=args.extra_weight, extra_val_dirs=args.extra_val_dirs,
-          lr=args.lr, tag=args.tag)
+          lr=args.lr, tag=args.tag, mx_sign_override=args.mx_sign, fmedial_loss=args.fmedial_loss)
