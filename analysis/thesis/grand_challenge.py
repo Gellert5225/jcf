@@ -615,7 +615,8 @@ def windowize(feat, cfg):
         return feat
     if cfg.get("window_only_positions"):
         return _windowize_positions_only(feat, w, q_dim=cfg.get("q_dim", 16), n_pos=cfg.get("n_pos", 9),
-                                         pelvis_t_cols=(3, 4, 5) if cfg.get("pelvis_per_window_centering") else None)
+                                         pelvis_t_cols=(3, 4, 5) if cfg.get("pelvis_per_window_centering") else None,
+                                         heading_norm=cfg.get("heading_norm", False))
     return _windowize(feat, w, replicate_q=cfg.get("replicate_q", False))
 
 

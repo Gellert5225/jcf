@@ -41,7 +41,7 @@ def test_sign_constants_agree_with_the_settled_convention():
 
 def test_only_the_qc_sets_use_the_physical_sign():
     for name, cfg in tm.INPUT_SETS.items():
-        if name in QC_SETS:
+        if name.startswith(QC_SETS):      # the QC sets and the sets derived from them (e.g. *_sojrqc_hd)
             assert tm.mx_medial_sign_of(cfg) == -1.0, name
         else:
             assert "mx_medial_sign" not in cfg and tm.mx_medial_sign_of(cfg) == 1.0, name

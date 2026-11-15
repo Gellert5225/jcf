@@ -359,6 +359,19 @@ for _base in ("qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojr",
                                          f"({LABEL_MASK_FILE}: {LABEL_MASK_KEY})")
 
 
+# Heading (Nov 2026): the pelvis yaw is a q input and the COM / foot windows are pelvis-relative vectors in lab axes, so
+# the inputs depended on which way the subject faced in the lab. 75 % of the walking trials (Moore, treadmill) face
+# +90 deg in OpenSim ground and Carter / Tiziana / Falisse / Fregly ~0 deg, so the heading acted as a lab label; an
+# optimizer export rotated about the vertical got stance F_medial means from 1.5 to 2.7 BW for the same motion.
+# "*_hd": every sample is rotated about the vertical so its centre-frame pelvis faces +x
+# (inference_posture_surrogate.remove_heading): the pelvis angles in q and all 20 frames of the COM / foot windows.
+for _base in ("qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc",
+              "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc"):
+    INPUT_SETS[_base + "_hd"] = dict(INPUT_SETS[_base], heading_norm=True,
+                                     desc=INPUT_SETS[_base]["desc"] + ", heading removed per sample "
+                                          "(centre-frame pelvis faces +x)")
+
+
 def fmedial_term(fy, mx, height_m, mx_sign, alpha=0.5, d_m=0.045):
     """F_medial = alpha*|F_y| + mx_sign*M_x*H/d_m (BW) from F_y (BW) and the raw right-knee M_x (BW*H); torch tensors
     or numpy arrays. The F_medial loss term of train() and inference_posture_surrogate's f_medial."""
@@ -752,7 +765,7 @@ def _windowize(feat, window, replicate_q=False, q_dim=16):
 
 
 def _windowize_positions_only(feat, window, q_dim=16, n_pos=9,
-                              pelvis_t_cols=None):
+                              pelvis_t_cols=None, heading_norm=False):
     """For variants where only the position channels are windowed; q and any
     extras (mass, height) are taken from the center frame only.
 
@@ -766,6 +779,9 @@ def _windowize_positions_only(feat, window, q_dim=16, n_pos=9,
         q[cols] becomes q[k, cols] − mean(q[k-half : k-half+window, cols]).
         Caller must supply raw (un-trial-centered) values in those columns of
         `feat`. Used by the `*_winctr_*` input_sets.
+    heading_norm: rotate each output row about the vertical so its centre-frame pelvis faces +x (the `*_hd` sets):
+        q's pelvis tilt / list / rotation (columns 0:3) and the first three 3-vectors of every window frame (COM, right
+        and left foot relative to the pelvis) go through inference_posture_surrogate.remove_heading.
     """
     if window <= 1:
         return feat
@@ -792,6 +808,13 @@ def _windowize_positions_only(feat, window, q_dim=16, n_pos=9,
             src_idx = np.clip(np.arange(T) + rel, 0, T - 1)
             pelvis_win[:, offset, :] = feat[src_idx][:, cols]
         q_center[:, cols] = q_center[:, cols] - pelvis_win.mean(axis=1)
+    if heading_norm:
+        from inference_posture_surrogate import remove_heading
+        ang, vecs = remove_heading(q_center[:, 0:3], *(pos_windowed[:, :, k:k + 3] for k in (0, 3, 6)))
+        q_center[:, 0:3] = ang
+        for k, v in zip((0, 3, 6), vecs):
+            pos_windowed[:, :, k:k + 3] = v
+        pos_flat = pos_windowed.reshape(T, window * n_pos)
     extras_center = feat[:, pos_end:] if extras_size > 0 else np.zeros((T, 0), dtype=feat.dtype)
     return np.hstack([q_center, pos_flat, extras_center])
 
@@ -841,6 +864,7 @@ class FrameDataset(Dataset):
                             feat, window, q_dim=cfg.get("q_dim", 16),
                             n_pos=cfg.get("n_pos", 9),
                             pelvis_t_cols=pelvis_cols,
+                            heading_norm=cfg.get("heading_norm", False),
                         )
                     else:
                         feat = _windowize(feat, window,
@@ -1493,6 +1517,8 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 # factor on the raw right-knee mx in F_medial (loss term and inference_posture_surrogate.f_medial);
                 # checkpoints without the key used the legacy +1
                 "mx_medial_sign": mx_sign,
+                # samples rotated so the centre-frame pelvis faces +x (the *_hd sets; inference applies the same)
+                "heading_norm": bool(INPUT_SETS[input_set].get("heading_norm", False)),
                 "label_mask": label_mask,
                 "init_from": init_from,
                 "extra_dirs": extra_dirs,

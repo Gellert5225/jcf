@@ -194,6 +194,52 @@ def urdf_pelvis_to_opensim(pelvis_rot_urdf):
     return np.stack([tilt, lst, rot], axis=-1)
 
 
+def opensim_pelvis_matrix(pelvis_ang):
+    """(..., 3, 3) pelvis orientation in ground, R = Rz(tilt) Rx(list) Ry(rotation), from OpenSim
+    [pelvis_tilt, pelvis_list, pelvis_rotation] (..., 3) in rad."""
+    a = np.asarray(pelvis_ang, dtype=np.float64)
+    return _rot(2, a[..., 0]) @ _rot(0, a[..., 1]) @ _rot(1, a[..., 2])
+
+
+def opensim_pelvis_angles(R):
+    """Inverse of opensim_pelvis_matrix: OpenSim [pelvis_tilt, pelvis_list, pelvis_rotation] (..., 3), rad."""
+    lst = np.arcsin(np.clip(R[..., 2, 1], -1.0, 1.0))
+    tilt = np.arctan2(-R[..., 0, 1], R[..., 1, 1])
+    rot = np.arctan2(-R[..., 2, 0], R[..., 2, 2])
+    return np.stack([tilt, lst, rot], axis=-1)
+
+
+def pelvis_heading(pelvis_ang):
+    """Heading of the pelvis (rad): yaw about ground y (up) of its forward (x) axis projected on the ground plane;
+    0 = facing ground +x, positive = turned from +x toward -z (OpenSim's positive rotation about y)."""
+    x = opensim_pelvis_matrix(pelvis_ang)[..., :, 0]
+    return np.arctan2(-x[..., 2], x[..., 0])
+
+
+def remove_heading(pelvis_ang, *vectors):
+    """Rotate each sample about the vertical so its pelvis faces ground +x (the "_hd" input sets).
+
+    The knee load does not depend on which way the subject faces in the lab, but the surrogate's inputs did: 75 % of
+    the walking training trials (Moore, treadmill) face +90 deg in OpenSim ground and the rest ~0 deg, so the heading
+    acted as a lab label and a 0-deg optimizer export was read as a different lab. The rotation uses the centre frame's
+    pelvis heading (pelvis_heading), so a sample needs nothing outside its own inputs and turning is handled.
+
+    pelvis_ang : (N, 3) OpenSim [pelvis_tilt, pelvis_list, pelvis_rotation] of the centre frame, rad.
+    vectors    : arrays (N, ..., 3) in OpenSim ground axes (e.g. the (N, 20, 3) COM / foot windows relative to the
+                 pelvis), each rotated by the sample's own heading.
+    Returns (pelvis angles (N, 3) with heading 0, [rotated vectors]).
+    """
+    a = np.asarray(pelvis_ang, dtype=np.float64)
+    Rm = _rot(1, -pelvis_heading(a))                                     # (N, 3, 3)
+    ang = opensim_pelvis_angles(Rm @ opensim_pelvis_matrix(a))
+    out = []
+    for v in vectors:
+        v = np.asarray(v, dtype=np.float64)
+        Rb = Rm.reshape(Rm.shape[:1] + (1,) * (v.ndim - 2) + (3, 3))
+        out.append((Rb @ v[..., None])[..., 0])
+    return ang, out
+
+
 class JCFPostureSurrogate:
     """
     Loads the (q_inst, windowed positions, mass, height) MLP surrogate.
@@ -227,6 +273,9 @@ class JCFPostureSurrogate:
         # as the two above, trained only on QC-passing SO+JR frames with the physical M_x sign (mx_medial_sign -1)
         "qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc",
         "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc",
+        # as the two above with the heading removed per sample (remove_heading; done here, callers pass lab axes)
+        "qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc_hd",
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_hd",
     )
     LEGACY_MX_MEDIAL_SIGN = 1.0   # checkpoints without "mx_medial_sign" (all before Nov 2026)
 
@@ -251,6 +300,9 @@ class JCFPostureSurrogate:
         # joint angles; the three translations are dropped here, so they have no effect
         # on the output and receive no gradient.
         self.drop_pelvis_translation = "_notrans_" in input_set
+        # *_hd: each sample is rotated about the vertical so its centre-frame pelvis faces +x (remove_heading), as in
+        # training; the caller keeps passing lab-axis inputs, whichever way the subject faces
+        self.heading_norm = bool(ckpt.get("heading_norm", input_set.endswith("_hd")))
         # Point on each calcn body whose position the foot channels expect (calcn frame, m).
         # Checkpoints from before foot-point variants used the calcn origin.
         self.foot_point = np.asarray(ckpt.get("foot_point", (0.0, 0.0, 0.0)), dtype=np.float64)
@@ -377,9 +429,25 @@ class JCFPostureSurrogate:
         if self.drop_pelvis_translation:
             ja = np.delete(ja, PELVIS_TX_COLS, axis=1)             # (N, 13)
         feat = np.hstack([ja, pos_flat, mass_col, height_col]).astype(np.float32)
+        if self.heading_norm:
+            feat = self._remove_heading_features(feat)
         assert feat.shape[1] == self.n_features, \
             f"Feature width {feat.shape[1]} != expected {self.n_features}"
         return torch.tensor(feat, device=self.device)
+
+    def _remove_heading_features(self, feat):
+        """Rotate each feature row so its centre-frame pelvis faces +x: pelvis angles (columns 0:3) and the COM / foot
+        3-vectors of all 20 window frames (the same transform as train_mlp._windowize_positions_only(heading_norm))."""
+        q_dim = feat.shape[1] - WINDOW * self.n_pos_ch - 2
+        win = feat[:, q_dim:q_dim + WINDOW * self.n_pos_ch].reshape(len(feat), WINDOW, self.n_pos_ch)
+        ang, vecs = remove_heading(feat[:, 0:3], *(win[:, :, k:k + 3] for k in (0, 3, 6)))
+        out = feat.copy()
+        out[:, 0:3] = ang
+        win = win.copy()
+        for k, v in zip((0, 3, 6), vecs):
+            win[:, :, k:k + 3] = v
+        out[:, q_dim:q_dim + WINDOW * self.n_pos_ch] = win.reshape(len(feat), -1)
+        return out.astype(np.float32)
 
     # ─── Prediction entry points ─────────────────────────────────────────────
 

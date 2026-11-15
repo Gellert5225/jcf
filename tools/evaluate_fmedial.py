@@ -352,7 +352,8 @@ def features_for(d, cfg, args):
     if w > 1:
         if cfg.get("window_only_positions"):
             feat = _windowize_positions_only(feat, w, q_dim=cfg.get("q_dim", 16), n_pos=cfg.get("n_pos", 9),
-                                             pelvis_t_cols=(3, 4, 5) if cfg.get("pelvis_per_window_centering") else None)
+                                             pelvis_t_cols=(3, 4, 5) if cfg.get("pelvis_per_window_centering") else None,
+                                             heading_norm=cfg.get("heading_norm", False))
         else:
             feat = _windowize(feat, w, replicate_q=cfg.get("replicate_q", False))
     return feat, labels, fmeta
