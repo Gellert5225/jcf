@@ -1,0 +1,105 @@
+tag,setting,time
+default,"tolerance 1e-4, 200 iterations (labeller default)",1.42
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.5
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.51
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.52
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.53
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.54
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.55
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.56
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.57
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.58
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.59
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.6
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.61
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.62
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.63
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.64
+default,"tolerance 1e-4, 200 iterations (labeller default)",4.65
+tol1e-3,"tolerance 1e-3, 200 iterations",4.5
+tol1e-3,"tolerance 1e-3, 200 iterations",4.51
+tol1e-3,"tolerance 1e-3, 200 iterations",4.52
+tol1e-3,"tolerance 1e-3, 200 iterations",4.53
+tol1e-3,"tolerance 1e-3, 200 iterations",4.54
+tol1e-3,"tolerance 1e-3, 200 iterations",4.55
+tol1e-3,"tolerance 1e-3, 200 iterations",4.56
+tol1e-3,"tolerance 1e-3, 200 iterations",4.57
+tol1e-3,"tolerance 1e-3, 200 iterations",4.58
+tol1e-3,"tolerance 1e-3, 200 iterations",4.59
+tol1e-3,"tolerance 1e-3, 200 iterations",4.6
+tol1e-3,"tolerance 1e-3, 200 iterations",4.62
+tol1e-2,"tolerance 1e-2, 200 iterations",4.5
+tol1e-2,"tolerance 1e-2, 200 iterations",4.51
+tol1e-2,"tolerance 1e-2, 200 iterations",4.52
+tol1e-2,"tolerance 1e-2, 200 iterations",4.53
+tol1e-2,"tolerance 1e-2, 200 iterations",4.54
+tol1e-2,"tolerance 1e-2, 200 iterations",4.56
+tol1e-2,"tolerance 1e-2, 200 iterations",4.57
+tol1e-1,"tolerance 1e-1, 200 iterations",4.51
+tol1e-1,"tolerance 1e-1, 200 iterations",4.52
+tol1e-1,"tolerance 1e-1, 200 iterations",4.57
+it1000,"tolerance 1e-4, 1000 iterations",1.42
+it1000,"tolerance 1e-4, 1000 iterations",4.5
+it1000,"tolerance 1e-4, 1000 iterations",4.51
+it1000,"tolerance 1e-4, 1000 iterations",4.52
+it1000,"tolerance 1e-4, 1000 iterations",4.53
+it1000,"tolerance 1e-4, 1000 iterations",4.54
+it1000,"tolerance 1e-4, 1000 iterations",4.55
+it1000,"tolerance 1e-4, 1000 iterations",4.56
+it1000,"tolerance 1e-4, 1000 iterations",4.57
+it1000,"tolerance 1e-4, 1000 iterations",4.58
+it1000,"tolerance 1e-4, 1000 iterations",4.59
+it1000,"tolerance 1e-4, 1000 iterations",4.6
+it1000,"tolerance 1e-4, 1000 iterations",4.61
+it1000,"tolerance 1e-4, 1000 iterations",4.62
+it1000,"tolerance 1e-4, 1000 iterations",4.63
+it1000,"tolerance 1e-4, 1000 iterations",4.64
+it1000,"tolerance 1e-4, 1000 iterations",4.65
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.5
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.51
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.52
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.53
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.54
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.55
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.56
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.57
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.58
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.59
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.6
+tol1e-3_it1000,"tolerance 1e-3, 1000 iterations",4.62
+nophys,no muscle force-length-velocity,1.37
+nophys,no muscle force-length-velocity,1.39
+nophys,no muscle force-length-velocity,1.45
+nophys,no muscle force-length-velocity,4.5
+nophys,no muscle force-length-velocity,4.51
+nophys,no muscle force-length-velocity,4.52
+nophys,no muscle force-length-velocity,4.53
+nophys,no muscle force-length-velocity,4.54
+nophys,no muscle force-length-velocity,4.55
+nophys,no muscle force-length-velocity,4.56
+nophys,no muscle force-length-velocity,4.57
+nophys,no muscle force-length-velocity,4.58
+nophys,no muscle force-length-velocity,4.59
+nophys,no muscle force-length-velocity,4.6
+nophys,no muscle force-length-velocity,4.61
+nophys,no muscle force-length-velocity,4.63
+capsule,hyperextension capsule at the right knee,1.4
+capsule,hyperextension capsule at the right knee,2.65
+capsule,hyperextension capsule at the right knee,4.5
+capsule,hyperextension capsule at the right knee,4.51
+capsule,hyperextension capsule at the right knee,4.52
+capsule,hyperextension capsule at the right knee,4.53
+capsule,hyperextension capsule at the right knee,4.54
+capsule,hyperextension capsule at the right knee,4.55
+capsule,hyperextension capsule at the right knee,4.56
+capsule,hyperextension capsule at the right knee,4.57
+capsule,hyperextension capsule at the right knee,4.58
+capsule,hyperextension capsule at the right knee,4.59
+capsule,hyperextension capsule at the right knee,4.6
+capsule,hyperextension capsule at the right knee,4.61
+capsule,hyperextension capsule at the right knee,4.62
+capsule,hyperextension capsule at the right knee,4.63
+capsule,hyperextension capsule at the right knee,4.64
+capsule,hyperextension capsule at the right knee,4.65
+capsule,hyperextension capsule at the right knee,4.66
+capsule,hyperextension capsule at the right knee,4.67

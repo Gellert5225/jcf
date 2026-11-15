@@ -21,6 +21,7 @@ import pandas as pd  # noqa: E402
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 
 from fig_plain_trajectories import infer  # noqa: E402   (runs infer_trajectory_csv.py through its CLI)
 from kam_trajectory_csv import kam_series, runs  # noqa: E402
@@ -29,6 +30,7 @@ PLAIN = "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_c
 CURRENT = "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt"
 D_M, LIMIT = 0.045, 1.4
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
+OSIM_FAINT = "#a9d9c4"   # rejected OpenSim frames: a faded aqua, recessive
 INK, SECOND, BAND, GRID, SEED = "#0b0b0b", "#52514e", "#ecebe6", "#e4e3df", "#8fb6ea"
 
 plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10, "axes.spines.top": False,
@@ -44,13 +46,25 @@ def main():
     ap.add_argument("--height", type=float, default=1.7)
     ap.add_argument("--opensim-folder", default=None, help="labelled trial folder of this export (label_trajectory_csv.py); "
                     "draws its JointReaction with the SO muscle forces (jcf_output_sojr/), -Mx")
+    ap.add_argument("--opensim-subdir", default="jcf_output_sojr",
+                    help="JointReaction sub-folder of --opensim-folder (jcf_output_exact_sojr: SO solved exactly, so_exact.py)")
+    ap.add_argument("--suffix", default="", help="appended to the output file name")
+    ap.add_argument("--new-pattern", default=PLAIN, help="checkpoint pattern of the new model, {} = seed 1-3 "
+                    "(default: the plain models; the heading-free ones end in _sojrqc_hd_e100_s{}.pt)")
+    ap.add_argument("--new-name", default="new model", help="legend name of the new model")
+    ap.add_argument("--gc-note", default="On the Grand Challenge implants the new model reads ~2x high at push-off and "
+                    "its loading peak comes ~80 ms late.", help="last footnote line: the new model on the implants")
     ap.add_argument("--out", default=os.path.join(REPO, "results", "thesis", "exports"))
     a = ap.parse_args()
+    exact = "exact" in a.opensim_subdir
+    osim_name = "OpenSim, SO solved exactly" if exact else "OpenSim with muscle forces"
     os.chdir(REPO)
     os.makedirs(a.out, exist_ok=True)
     H = a.height
     tag = "".join(ch if ch.isalnum() else "_" for ch in a.name).strip("_").lower()
-    plain = [infer(a.csv, PLAIN.format(s), a.mass, H, os.path.join(a.out, f"{tag}_plain_s{s}.csv")) for s in (1, 2, 3)]
+    pred_name = "_plain" if a.new_pattern == PLAIN else f"_new{a.suffix}"   # the plain names are read by score_export
+    plain = [infer(a.csv, a.new_pattern.format(s), a.mass, H, os.path.join(a.out, f"{tag}{pred_name}_s{s}.csv"))
+             for s in (1, 2, 3)]
     cur = infer(a.csv, CURRENT, a.mass, H, os.path.join(a.out, f"{tag}_current_fpopt.csv"))
     t = plain[0].time.to_numpy()
     seeds = [np.abs(0.5 * np.abs(r.fy) - r.mx * H / D_M).to_numpy() for r in plain]       # -Mx, |F_medial|
@@ -70,8 +84,9 @@ def main():
     ax.grid(axis="both", color=GRID, lw=0.6, zorder=0)
     ref = os.path.join(REPO, "results", "thesis", "sep23", "per_frame.csv")
     osim_rows = None
+    top = 3.8   # y-axis top; raised so OpenSim frames that pass the solver checks are never clipped
     if a.opensim_folder:
-        so = os.path.join(a.opensim_folder, "jcf_output_sojr")
+        so = os.path.join(a.opensim_folder, a.opensim_subdir)
         f = next(os.path.join(so, x) for x in sorted(os.listdir(so)) if x.endswith("JointReaction_ReactionLoads.sto"))
         txt = open(f).read().split("\n"); n = next(i for i, l in enumerate(txt) if l.strip().lower() == "endheader")
         jr = pd.read_csv(f, sep=r"\s+", skiprows=n + 1)
@@ -85,14 +100,17 @@ def main():
             # applies its force at a fixed foot point with the heel-to-toe shift carried by the foot moment
             ok = ~(z["so_any_r"].astype(bool) | z["nonfinite_r"].astype(bool))
             keep = np.interp(jr.time, z["time"], ok.astype(float)) > 0.5
-        gc = np.clip(g, 0, 3.8)
+        if keep is not None and keep.any():
+            top = max(top, np.ceil(g[keep].max() * 5) / 5 + 0.2)
+        gc = np.clip(g, 0, top)
         if keep is None:
-            ax.plot(jr.time, gc, color=AQUA, lw=1.4, zorder=2, label="OpenSim with muscle forces, -Mx (clipped at 3.8)")
+            ax.plot(jr.time, gc, color=AQUA, lw=1.4, zorder=2, label=f"{osim_name}, -Mx (clipped at {top:g})")
         else:
-            ax.plot(jr.time, np.where(keep, gc, np.nan), color=AQUA, lw=1.6, zorder=2,
-                    label="OpenSim with muscle forces, -Mx (frames passing the solver checks)")
-            ax.plot(jr.time, np.where(~keep, gc, np.nan), color=AQUA, lw=1.0, ls=(0, (1.5, 1.5)), zorder=2,
-                    label="OpenSim, frames failing the solver checks (clipped at 3.8)")
+            ax.plot(jr.time, np.where(keep, gc, np.nan), color=AQUA, lw=2.8, zorder=5, solid_capstyle="round",
+                    path_effects=[pe.Stroke(linewidth=4.4, foreground="white"), pe.Normal()],
+                    label=f"{osim_name}, -Mx: valid frames (pass the solver checks)")
+            ax.plot(jr.time, np.where(~keep, gc, np.nan), color=OSIM_FAINT, lw=0.9, ls=(0, (1.2, 1.8)), zorder=1,
+                    label=f"OpenSim, rejected frames (solver at its limits; unreliable; clipped at {top:g})")
         osim_rows = (jr.time.to_numpy(), g, keep)
     elif os.path.abspath(a.csv) == os.path.join(REPO, "robot_q_log.csv") and os.path.exists(ref):
         pf = pd.read_csv(ref)
@@ -100,12 +118,12 @@ def main():
         ax.plot(pf.t, np.clip(g, 0, 3.8), color="#b9b7b0", lw=3.0, zorder=2,
                 label="OpenSim with muscle forces, -Mx (fails the label QC; clipped at 3.8)")
     for i, f in enumerate(seeds):
-        ax.plot(t, f, color=SEED, lw=1.0, zorder=3, label="new model, 3 training runs (muscle forces, -Mx)" if i == 0 else None)
-    ax.plot(t, mean, color=BLUE, lw=2.6, zorder=6, label="new model, mean of 3")
+        ax.plot(t, f, color=SEED, lw=1.0, zorder=3, label=f"{a.new_name}, 3 training runs (muscle forces, -Mx)" if i == 0 else None)
+    ax.plot(t, mean, color=BLUE, lw=2.6, zorder=6, label=f"{a.new_name}, mean of 3")
     ax.plot(t, cur_plus, color=INK, lw=1.8, ls=(0, (5, 2)), zorder=5, label="your current model (fpopt_w20_fmW0p5), +Mx as in ISRR")
     ax.plot(t, cur_minus, color=ORANGE, lw=1.8, zorder=4, label="your current model, correct sign (-Mx)")
     ax.set_xlim(t[0] - 0.1, t[-1] + 0.1)
-    ax.set_ylim(0, 3.8)
+    ax.set_ylim(0, top)
     ax.set_xlabel("time (s)")
     ax.set_ylabel("|F_medial| (BW)")
     ax.legend(loc="upper left", bbox_to_anchor=(0.0, -0.13), ncol=2, fontsize=8.6, frameon=False, columnspacing=1.6)
@@ -115,7 +133,7 @@ def main():
         osim_txt = ""
         if osim_rows is not None:
             mo = (osim_rows[0] >= lo - 1e-9) & (osim_rows[0] <= hi + 1e-9)
-            osim_txt = f", OpenSim with muscles {osim_rows[1][mo].mean():.2f} (peak {osim_rows[1][mo].max():.2f})"
+            osim_txt = f", {'OpenSim exact SO' if exact else 'OpenSim with muscles'} {osim_rows[1][mo].mean():.2f} (peak {osim_rows[1][mo].max():.2f})"
             if osim_rows[2] is not None:
                 osim_txt += f" ({np.mean(osim_rows[2][mo]):.0%} pass the solver checks)"
         rows.append(f"stance {n} ({lo:.2f}-{hi:.2f} s): new {mean[m].mean():.2f} (runs "
@@ -126,14 +144,16 @@ def main():
     ax.text(0.0, -0.36, "Mean |F_medial| in right single stance (BW).\n  " + "\n  ".join(rows) + "\n"
             f"Inputs: pelvis angles converted from the URDF to OpenSim's convention, your exported COM and foot points, "
             f"contact from the exported foot wrenches; {a.mass:g} kg, {H:g} m.\n" +
-            ("OpenSim with muscle forces is the label pipeline the new model was trained on, not measured ground truth: on "
-             "the Grand Challenge implants it reads ~2x high at push-off.\n" if osim_rows is not None else
+            (("OpenSim with SO solved exactly: the label pipeline with its optimizer fixed (the models were trained on "
+              "OpenSim's own SO, which stops short of its optimum on many frames). Not measured ground truth.\n" if exact else
+              "OpenSim with muscle forces is the label pipeline the new model was trained on, not measured ground truth: on "
+              "the Grand Challenge implants it reads ~2x high at push-off.\n") if osim_rows is not None else
              "No ground truth on this motion. ") +
-            "On the Grand Challenge implants the new model reads ~2x high at push-off and its loading peak comes ~80 ms late.",
+            a.gc_note,
             transform=ax.transAxes, ha="left", va="top", fontsize=8.6, color=SECOND, linespacing=1.5)
-    ax.set_title(f"{a.name}: new model (muscle forces, correct sign) vs your current model "
+    ax.set_title(f"{a.name}: {a.new_name} (muscle forces, correct sign) vs your current model "
                  f"(grey = right single stance, dashed = 1.4 BW)", fontsize=10.5)
-    out = os.path.join(a.out, f"fig_{tag}_for_william.png")
+    out = os.path.join(a.out, f"fig_{tag}_for_william{a.suffix}.png")
     fig.savefig(out)
     print("wrote", out)
 

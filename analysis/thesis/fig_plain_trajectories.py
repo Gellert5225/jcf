@@ -28,6 +28,7 @@ import pandas as pd  # noqa: E402
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 
 from kam_trajectory_csv import kam_series, runs  # noqa: E402
 
@@ -35,6 +36,7 @@ CKPT = "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_co
 OLD = "models/runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt"
 D_M = 0.045
 BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
+OSIM_FAINT = "#a9d9c4"   # rejected OpenSim frames: a faded aqua, recessive
 INK, SECOND, MUTED, BAND, GRID = "#0b0b0b", "#52514e", "#8a8986", "#ecebe6", "#e4e3df"
 SEED_BLUE = "#9dc1ee"
 
@@ -61,17 +63,26 @@ def infer(csv, ckpt, mass, height, out_csv):
 
 def opensim_for(csv, mass, H):
     """OpenSim with the SO muscle forces for this export: the labelled folder under jcf/external whose metadata names
-    this CSV (pipeline/label_trajectory_csv.py). Returns time, F_medial / compression / moment parts (-Mx, BW), the frames
+    this CSV (pipeline/label_trajectory_csv.py; whole trials only, converted pelvis angles and exact SO preferred, the
+    exact-SO JointReaction jcf_output_exact_sojr/ used when present). Returns time, F_medial / compression / moment parts (-Mx, BW), the frames
     passing the SO checks of label_mask.npz (the fixed-COP rule is left out: optimizer exports apply the force at a
     fixed foot point and carry the heel-to-toe shift in the foot moment), and whether the pelvis angles were converted."""
     import glob
     import json
+    cands = []
     for m in sorted(glob.glob(os.path.join(REPO, "jcf", "external", "*", "metadata.json"))):
         meta = json.load(open(m))
         d = os.path.dirname(m)
-        if os.path.abspath(meta.get("source_csv", "")) != os.path.abspath(csv) or not os.path.isdir(f"{d}/jcf_output_sojr"):
+        if os.path.abspath(meta.get("source_csv", "")) != os.path.abspath(csv) or "segment" in meta:
             continue
-        f = next((os.path.join(d, "jcf_output_sojr", x) for x in sorted(os.listdir(f"{d}/jcf_output_sojr"))
+        sub = next((x for x in ("jcf_output_exact_sojr", "jcf_output_sojr") if os.path.isdir(f"{d}/{x}")), None)
+        if sub is None:
+            continue
+        converted = "converted" in (meta.get("pelvis_angles") or "")
+        cands.append(((converted, sub == "jcf_output_exact_sojr"), d, sub, converted))
+    # prefer converted pelvis angles (fixed labeller), then the exact SO labels
+    for _, d, sub, converted in sorted(cands, key=lambda c: c[0], reverse=True):
+        f = next((os.path.join(d, sub, x) for x in sorted(os.listdir(f"{d}/{sub}"))
                   if x.endswith("JointReaction_ReactionLoads.sto")), None)
         if f is None:
             continue
@@ -82,12 +93,12 @@ def opensim_for(csv, mass, H):
         comp = 0.5 * np.abs(jr[pre + "fy"].to_numpy()) / bw
         mom = -jr[pre + "mx"].to_numpy() / (bw * D_M)
         keep = None
-        if os.path.exists(f"{d}/jcf_output_sojr/label_mask.npz"):
-            z = np.load(f"{d}/jcf_output_sojr/label_mask.npz")
+        if os.path.exists(f"{d}/{sub}/label_mask.npz"):
+            z = np.load(f"{d}/{sub}/label_mask.npz")
             ok = ~(z["so_any_r"].astype(bool) | z["nonfinite_r"].astype(bool))
             keep = np.interp(jr.time, z["time"], ok.astype(float)) > 0.5
-        return dict(t=jr.time.to_numpy(), fmed=comp + mom, comp=comp, mom=mom, keep=keep,
-                    converted="pelvis_angles" in meta and "converted" in meta["pelvis_angles"], folder=d)
+        return dict(t=jr.time.to_numpy(), fmed=comp + mom, comp=comp, mom=mom, keep=keep, converted=converted,
+                    folder=d, exact=sub == "jcf_output_exact_sojr")
     return None
 
 
@@ -137,15 +148,16 @@ def main():
             ax.plot(t, r.fmed, color=SEED_BLUE, lw=1.0, zorder=3, label="seeds 1-3" if i == 0 else None)
         ax.plot(t, mean["fmed"], color=BLUE, lw=2.4, zorder=5, label="plain model, mean of 3")
         if osim is not None:
-            pel = "pelvis converted" if osim["converted"] else "pelvis copied"
+            pel = ("pelvis converted" if osim["converted"] else "pelvis copied") + (", exact SO" if osim["exact"] else "")
             g = np.clip(osim["fmed"], -0.3, 4.4)
             if osim["keep"] is None:
                 ax.plot(osim["t"], g, color=AQUA, lw=1.3, zorder=2, label=f"OpenSim with muscle forces ({pel})")
             else:
-                ax.plot(osim["t"], np.where(osim["keep"], g, np.nan), color=AQUA, lw=1.6, zorder=2,
-                        label=f"OpenSim + muscles ({pel}), passes SO checks")
-                ax.plot(osim["t"], np.where(~osim["keep"], g, np.nan), color=AQUA, lw=0.9, ls=(0, (1.5, 1.5)),
-                        zorder=2, label="OpenSim, fails SO checks (clipped)")
+                ax.plot(osim["t"], np.where(osim["keep"], g, np.nan), color=AQUA, lw=2.6, zorder=6,
+                        solid_capstyle="round", path_effects=[pe.Stroke(linewidth=4.2, foreground="white"), pe.Normal()],
+                        label=f"OpenSim + muscles ({pel}): valid frames")
+                ax.plot(osim["t"], np.where(~osim["keep"], g, np.nan), color=OSIM_FAINT, lw=0.9, ls=(0, (1.2, 1.8)),
+                        zorder=1, label="OpenSim, rejected frames (unreliable)")
         ax.plot(t, old_f, color=MUTED, lw=1.3, ls=(0, (1.5, 1.5)), zorder=2, label="old fpopt model (no muscles)")
         ax.set_ylim(-0.3, 6.2)
         ax.set_ylabel("F_medial, -Mx (BW)")
@@ -159,10 +171,10 @@ def main():
         ax.plot(t, mean["mom"], color=ORANGE, lw=2.0, zorder=4, label="moment part -Mx H/d")
         if osim is not None:
             kk = osim["keep"] if osim["keep"] is not None else np.ones(len(osim["t"]), bool)
-            ax.plot(osim["t"], np.where(kk, osim["comp"], np.nan), color=BLUE, lw=1.0, ls=(0, (1.5, 1.5)), zorder=3,
-                    label="OpenSim compression (passing frames)")
-            ax.plot(osim["t"], np.where(kk, osim["mom"], np.nan), color=ORANGE, lw=1.0, ls=(0, (1.5, 1.5)), zorder=3,
-                    label="OpenSim moment (passing frames)")
+            ax.plot(osim["t"], np.where(kk, osim["comp"], np.nan), color=BLUE, lw=1.4, ls=(0, (1.5, 1.5)), zorder=3,
+                    label="OpenSim compression (valid frames)")
+            ax.plot(osim["t"], np.where(kk, osim["mom"], np.nan), color=ORANGE, lw=1.4, ls=(0, (1.5, 1.5)), zorder=3,
+                    label="OpenSim moment (valid frames)")
         ax.set_ylim(-1.2, 3.6)
         ax.set_ylabel("BW")
         ax.legend(loc="upper left", ncol=2)

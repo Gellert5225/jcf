@@ -7,7 +7,9 @@ foot wrenches; robot frame x-fwd / y-left / z-up) into a training-format trial f
     <out>/ik_results.mot  grf_data.mot  grf_loads.xml  scaled_model.osim  metadata.json  com_features.npz
           jcf_output/        Static Optimization + JointReaction in one AnalyzeTool pass (JointReaction there runs with
                              an empty forces_file, i.e. without the SO muscle forces; kept for reference)
-          jcf_output_sojr/   JointReaction rerun with forces_file = the SO force file: the muscle-inclusive labels
+          jcf_output_sojr/   JointReaction rerun with forces_file = the SO force file (OpenSim's own SO solution)
+          jcf_output_exact/  every SO frame re-solved to its exact optimum (analysis/thesis/so_exact.py)
+          jcf_output_exact_sojr/  JointReaction with the exact SO forces + label_mask.npz: the labels
           labels.csv  label_quality.json
 
 Run inside the OpenSim environment:
@@ -22,6 +24,10 @@ computes muscle forces from the states; (3) labels.csv uses those labels and the
 right knee: f_medial_bw = 0.5|Fy| - Mx*H/0.045; (4) no frames are interpolated away: the old 6 BW / 0.15 BW*H cleaning was
 tuned on the labels without muscle forces and would erase real peaks; the two thresholds are kept as flag columns.
 labels.csv also carries the one-pass (no muscle force) F_medial with the physical sign for comparison.
+(5) Nov 14 2026: OpenSim's SO (Ipopt) stops short of its optimum on most frames of optimizer exports without reporting a
+failure (fake dorsi/plantarflexor co-activation, inflated knee load; tolerance changes do not help), so every SO frame is
+re-solved exactly (jcf_output_exact/) and labels.csv uses that; f_medial_opensim_so_bw keeps OpenSim's own SO solution and
+so_valid marks frames passing the six SO rules (so_label_qc). --no-exact-so skips it (labels from jcf_output_sojr/).
 --split-at writes additional <out>_seg1, _seg2, … folders sliced at those times.
 """
 import argparse, os, sys, json, glob, shutil, re
@@ -146,11 +152,28 @@ def run_jr_with_so_forces(out):
     shutil.copy2(os.path.join(so, cands[0]), os.path.join(so, "BatchJCF_JointReaction_ReactionLoads.sto"))
 
 
+def jr_file(d):
+    """The JointReaction output of a results folder (BatchJCF_ copy if present)."""
+    c = sorted(f for f in os.listdir(d) if f.endswith("JointReaction_ReactionLoads.sto"))
+    if not c: raise SystemExit(f"no JointReaction output in {d}")
+    return os.path.join(d, "BatchJCF_JointReaction_ReactionLoads.sto" if "BatchJCF_JointReaction_ReactionLoads.sto" in c else c[0])
+
+
+def run_exact_so(out):
+    """Exact SO of jcf_output/ -> jcf_output_exact/, JointReaction + label_mask.npz -> jcf_output_exact_sojr/."""
+    from analysis.thesis import so_exact
+    so_exact.build(out, "jcf_output", "jcf_output_exact")
+
+
 def write_labels(out, mass, height, df_src):
-    """labels.csv from the muscle-inclusive JointReaction (jcf_output_sojr/), physical medial moment (-Mx, right knee).
+    """labels.csv from the muscle-inclusive JointReaction with the exact SO forces (jcf_output_exact_sojr/; OpenSim's own
+    SO solution, jcf_output_sojr/, when the exact run is missing), physical medial moment (-Mx, right knee).
     Nothing is interpolated; the old cleaning thresholds are kept as flags."""
     BW = mass * 9.81; pre = "walker_knee_r_on_tibia_r_in_tibia_r_"
-    so = read_sto(f"{out}/jcf_output_sojr/BatchJCF_JointReaction_ReactionLoads.sto")
+    exact = os.path.isdir(f"{out}/jcf_output_exact_sojr")
+    src = "jcf_output_exact_sojr" if exact else "jcf_output_sojr"
+    so = read_sto(jr_file(f"{out}/{src}"))
+    osj = read_sto(jr_file(f"{out}/jcf_output_sojr"))
     one = read_sto(f"{out}/jcf_output/BatchJCF_JointReaction_ReactionLoads.sto")
     t = so["time"].to_numpy()
     fy = so[pre + "fy"].to_numpy() / BW; mx = so[pre + "mx"].to_numpy() / (BW * height)
@@ -158,18 +181,29 @@ def write_labels(out, mass, height, df_src):
     fmed = ALPHA * np.abs(fy) - mx * height / D_M
     fy1 = np.interp(t, one["time"], one[pre + "fy"]) / BW; mx1 = np.interp(t, one["time"], one[pre + "mx"]) / (BW * height)
     fmed1 = ALPHA * np.abs(fy1) - mx1 * height / D_M
-    act = read_sto(f"{out}/jcf_output/BatchJCF_StaticOptimization_activation.sto")
+    fyo = np.interp(t, osj["time"], osj[pre + "fy"]) / BW; mxo = np.interp(t, osj["time"], osj[pre + "mx"]) / BW
+    fmed_os = ALPHA * np.abs(fyo) - mxo / D_M
+    valid = np.full(len(t), np.nan)
+    mk = f"{out}/{src}/label_mask.npz"
+    if os.path.exists(mk):
+        z = np.load(mk)
+        valid = np.interp(t, z["time"], (~(z["so_any_r"] | z["nonfinite_r"])).astype(float)) > 0.5
+    act_dir = "jcf_output_exact" if exact else "jcf_output"
+    act = read_sto(sorted(glob.glob(f"{out}/{act_dir}/*StaticOptimization_activation.sto"))[0])
     mus = [c for c in act.columns if c != "time" and not c.startswith("reserve")]
     sat = np.interp(t, act["time"], (act[mus].to_numpy() >= 0.999).sum(1))
     st = np.asarray(df_src["time"], float)
     rc = np.interp(t, st, (np.abs(df_src["right_foot_wrench_2"].to_numpy(float)) > 0.05 * BW).astype(float)) > 0.5
     lc = np.interp(t, st, (np.abs(df_src["left_foot_wrench_2"].to_numpy(float)) > 0.05 * BW).astype(float)) > 0.5
     ph = np.where(rc & lc, "dual", np.where(rc, "right", np.where(lc, "left", "flight")))
-    pd.DataFrame({"time": t, "phase": ph, "fy_bw": fy, "mx_bwh": mx, "f_medial_bw": fmed,
-                  "f_medial_no_muscle_bw": fmed1, "flag_resultant_gt6": res > 6.0, "flag_abs_mx_gt015": np.abs(mx) > 0.15,
-                  "n_saturated_muscles": sat}).to_csv(f"{out}/labels.csv", index=False)
+    pd.DataFrame({"time": t, "phase": ph, "fy_bw": fy, "mx_bwh": mx, "f_medial_bw": fmed, "so_valid": valid,
+                  "f_medial_opensim_so_bw": fmed_os, "f_medial_no_muscle_bw": fmed1, "flag_resultant_gt6": res > 6.0,
+                  "flag_abs_mx_gt015": np.abs(mx) > 0.15, "n_saturated_muscles": sat}).to_csv(f"{out}/labels.csv", index=False)
     r = ph == "right"
-    q = {"frames": int(len(t)), "labels": "jcf_output_sojr (JointReaction with the SO muscle forces)",
+    q = {"frames": int(len(t)), "labels": f"{src} (JointReaction with the "
+         + ("exact SO muscle forces)" if exact else "OpenSim SO muscle forces)"),
+         "right_single_stance_so_valid_fraction": float(np.mean(valid[r])) if r.any() and exact else None,
+         "right_single_stance_fmedial_opensim_so_mean_bw": float(fmed_os[r].mean()) if r.any() else None,
          "f_medial": "0.5*|Fy| - Mx*H/0.045 (medial moment = -Mx at walker_knee_r)",
          "frames_resultant_gt6bw": int((res > 6).sum()), "frames_abs_mx_gt015": int((np.abs(mx) > 0.15).sum()),
          "frames_with_gt5_saturated_muscles": int((sat > 5).sum()), "saturation_fraction": float((sat > 5).mean()),
@@ -183,12 +217,13 @@ def write_labels(out, mass, height, df_src):
 
 def slice_folder(src, dst, t0, t1):
     os.makedirs(f"{dst}/jcf_output", exist_ok=True)
-    if os.path.isdir(f"{src}/jcf_output_sojr"):
-        os.makedirs(f"{dst}/jcf_output_sojr", exist_ok=True)
-        for f in os.listdir(f"{src}/jcf_output_sojr"):
+    for sub in ("jcf_output_sojr", "jcf_output_exact", "jcf_output_exact_sojr"):
+        if not os.path.isdir(f"{src}/{sub}"): continue
+        os.makedirs(f"{dst}/{sub}", exist_ok=True)
+        for f in os.listdir(f"{src}/{sub}"):
             if f.endswith(".sto"):
-                df = read_sto(f"{src}/jcf_output_sojr/{f}"); m = (df["time"] >= t0) & (df["time"] <= t1)
-                write_sto(f"{dst}/jcf_output_sojr/{f}", df[m].reset_index(drop=True), read_header(f"{src}/jcf_output_sojr/{f}"))
+                df = read_sto(f"{src}/{sub}/{f}"); m = (df["time"] >= t0) & (df["time"] <= t1)
+                write_sto(f"{dst}/{sub}/{f}", df[m].reset_index(drop=True), read_header(f"{src}/{sub}/{f}"))
     for f in ("ik_results.mot", "grf_data.mot"):
         names = read_header_names(f"{src}/{f}"); df = read_sto(f"{src}/{f}"); m = (df["time"] >= t0) & (df["time"] <= t1)
         write_mot(f"{dst}/{f}", names, df[m].to_numpy(float), "Coordinates" if f.startswith("ik") else "GRF")
@@ -216,6 +251,7 @@ def main():
                     "the SO forces (if missing), labels.csv, segments and plot from the existing jcf_output")
     ap.add_argument("--copy-pelvis-angles", action="store_true", help="copy the URDF pelvis rotation coordinates as "
                     "OpenSim's (pre-Nov-2026 behaviour, wrong); default converts them")
+    ap.add_argument("--no-exact-so", action="store_true", help="skip the exact SO re-solve (labels from OpenSim's own SO)")
     a = ap.parse_args()
     model = a.model
     if model is None and not a.relabel_only:
@@ -226,11 +262,15 @@ def main():
         print(f"relabel-only: reusing {a.out}/jcf_output")
         if not os.path.exists(f"{a.out}/jcf_output_sojr/BatchJCF_JointReaction_ReactionLoads.sto"):
             run_jr_with_so_forces(a.out)
+        if not a.no_exact_so and not os.path.exists(f"{a.out}/jcf_output_exact_sojr/label_mask.npz"):
+            run_exact_so(a.out)
     else:
         t, BW, df = build_folder(a.csv, a.out, a.mass, a.height, model, copy_pelvis=a.copy_pelvis_angles)
         t0 = a.t0 if a.t0 is not None else float(t[0]); t1 = a.t1 if a.t1 is not None else float(t[-1])
         print(f"folder built: {a.out} ({len(t)} frames); running SO+JR on [{t0:.2f}, {t1:.2f}] s ...", flush=True)
         run_so_jr(a.out, t0, t1)
+        if not a.no_exact_so:
+            run_exact_so(a.out)
     q = write_labels(a.out, a.mass, a.height, df); print("label quality:", json.dumps(q))
     edges = [t0] + sorted(a.split_at) + [t1]
     for i in range(len(edges) - 1):
@@ -242,7 +282,7 @@ def main():
         ax.plot(lab["time"], lab["f_medial_bw"], color="#0b0b0b"); ax.axhline(1.4, color="#898781", lw=1)
         for ph, col in (("dual", "#e1e0d9"),):
             for tt in lab["time"][lab["phase"] == ph]: ax.axvspan(tt - 0.005, tt + 0.005, color=col, lw=0, alpha=0.7)
-        ax.set_xlabel("time (s)"); ax.set_ylabel("F_medial (BW)"); ax.set_title(f"SO+JR labels (muscle forces, -Mx) — {os.path.basename(a.out)}"); ax.grid(alpha=0.3)
+        ax.set_xlabel("time (s)"); ax.set_ylabel("F_medial (BW)"); ax.set_title(f"SO+JR labels (exact SO muscle forces, -Mx) — {os.path.basename(a.out)}"); ax.grid(alpha=0.3)
         fig.tight_layout(); fig.savefig(f"{a.out}/labels.png", dpi=120); print("plot:", f"{a.out}/labels.png")
 
 
