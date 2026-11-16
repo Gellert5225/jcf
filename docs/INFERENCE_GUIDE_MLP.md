@@ -4,7 +4,7 @@ This is the model for the **posture / gait optimizer**: it needs no ground-react
 joint angles, the geometric pose of the COM and feet relative to the pelvis, and (new) binary
 foot-contact flags. For the streaming BiCNN that consumes measured GRF, see `INFERENCE_GUIDE.md`.
 
-## Start here: the corrected checkpoints (Nov 2026)
+## Start here: the heading-free checkpoints (Nov 15 2026)
 
 Every checkpoint before November 2026, including the one behind the ISRR 2026 optimization results and
 `…_fpopt_w20_fmW0p5_e100.pt`, has two problems:
@@ -17,43 +17,54 @@ Every checkpoint before November 2026, including the one behind the ISRR 2026 op
    which is lateral on the right knee, so the medial moment is `-mx` (*M_x sign* below). With φ = 0.5,
    `0.5|F_y| + mx·H/d` is the **lateral** compartment load.
 
-For the gait optimizer, use the three corrected checkpoints below. They are the same network as
-`…_fpopt_w20_fmW0p5_e100.pt` (same 235 inputs, optimizer foot point, contact flags), trained on corrected data with a
-plain per-output loss:
+The Nov 14 replacements (`…_t100_sojrqc_e100_s{1,2,3}.pt`, "plain") fixed both, but kept a third problem, found on
+Nov 15 and shared by every earlier checkpoint:
 
-| File (`models/runs/mlp/`) | Best epoch | Val loss |
-|---|---|---|
-| `best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s1.pt` | 8 | 0.189 |
-| `best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s2.pt` | 9 | 0.185 |
-| `best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s3.pt` | 33 | 0.183 |
+3. **The heading.** The inputs include the pelvis yaw and the COM / foot positions relative to the pelvis in lab axes,
+   so they depended on which way the subject faced in the lab. 75 % of the walking training trials (the Moore
+   treadmill set) face +90° in OpenSim ground and the other labs ~0°, so the heading worked as a lab label: the same
+   optimizer export rotated about the vertical got right-stance F_medial means from 1.5 to 2.7 BW.
+
+For the gait optimizer, use the three **heading-free** checkpoints. Same network, inputs and call as the plain ones;
+the module rotates each sample about the vertical so its centre-frame pelvis faces +x (*Heading* below), so the output
+is the same whichever way the robot walks:
+
+| File (as sent) | Same file in `models/runs/mlp/` | Best epoch | Val loss |
+|---|---|---|---|
+| `knee_hd_s1.pt` | `best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_hd_e100_s1.pt` | 11 | 0.179 |
+| `knee_hd_s2.pt` | `…_sojrqc_hd_e100_s2.pt` | 15 | 0.204 |
+| `knee_hd_s3.pt` | `…_sojrqc_hd_e100_s3.pt` | 49 | 0.197 |
 
 s1, s2 and s3 are three training runs of the same model: identical data, split and settings, different random
-starting weights and batch order (`--init-seed 1/2/3`). They agree within about 0.3 BW on the optimizer's reference
-motion. **Average the three** (below) rather than picking one.
+starting weights and batch order (`--init-seed 1/2/3`). They spread more than the plain ones (right-stance means up to
+~0.6 BW apart on the optimizer exports), so **average the three** (below) rather than picking one.
 
-| | `…_fpopt_w20_fmW0p5_e100.pt` (old) | `…_fpopt_w20_t100_sojrqc_e100_s{1,2,3}.pt` |
+| | `…_fpopt_w20_fmW0p5_e100.pt` (old) | `knee_hd_s{1,2,3}.pt` |
 |---|---|---|
 | Labels | JointReaction without muscle forces | JointReaction with the static-optimization muscle forces |
 | Training frames | all | only frames passing a label-quality filter (23 %; drops trials with a fixed centre of pressure and frames where the muscle solver failed) |
 | Loss | per-output squared error + F_medial term with +mx | per-output squared error only (no F_medial term, so no sign in training) |
 | Sign used by `f_medial` | +mx (stored nowhere; module default) | −mx, stored in the checkpoint (`m.mx_medial_sign = -1`) |
 | Input timing | positions up to 0.3 s out of sync with the labels; window 80–200 ms depending on the lab | exact, 100 Hz, every window 200 ms |
+| Heading | inputs depend on the lab frame | removed per sample inside the module (`m.heading_norm = True`) |
 | Network, inputs, foot point, contact flags | 235 channels, 3×128 MLP, optimizer foot point, no pelvis translation | **same** |
 
 Why the plain per-output loss: on the muscle-force labels it was compared with three variants of the F_medial loss term
-(+mx, −mx, sign-free; 3 runs each, all scored with −mx). It had the lowest held-out errors (stance F_medial 0.37 BW,
-compression 0.49 BW, against 0.44 / 0.64 for the −mx term), no unstable runs, and the only above-chance score on the
-implants' gait modifications (6–7 of 10). `results/thesis/sign_ablation/fig_loss_variants.png` has the comparison;
-the earlier `…_sojrqc_fmW0p5_e100_s{1,2,3}.pt` (−mx F_medial term) remain available.
+(+mx, −mx, sign-free; 3 runs each, all scored with −mx, before the heading fix). It had the lowest held-out errors
+(stance F_medial 0.37 BW, compression 0.49 BW, against 0.44 / 0.64 for the −mx term), no unstable runs, and the only
+above-chance score on the implants' gait modifications (6–7 of 10). `results/thesis/sign_ablation/fig_loss_variants.png`
+has the comparison. The heading-free models use the same loss.
 
 ### What changes in your code
 
 1. **Load the new file. Nothing else in the call changes:** the same 16 joint angles, COM and foot windows at the
    optimizer's foot point, contact flags, mass and height, 20 frames at 100 Hz.
    ```python
-   m = JCFPostureSurrogate("best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s1.pt")
+   m = JCFPostureSurrogate("knee_hd_s1.pt")
    m.mx_medial_sign   # -1.0: out["f_medial"] already uses the medial moment
+   m.heading_norm     # True: the module removes the heading (step 5)
    ```
+   The Nov 15 `inference_posture_surrogate.py` is needed: older versions reject these files.
 2. **Do not compute F_medial with a hard-coded `+mx`.** Use `out["f_medial"]`, or `m.mx_medial_sign` in your own
    formula: `f_medial = 0.5*|fy| + m.mx_medial_sign * mx * H / d`. For the right knee that is `0.5*|fy| - mx*H/d`.
    In stance `fy` is negative, so `-fy` equals `|fy|` there and has no kink at zero (better for Ipopt).
@@ -69,9 +80,13 @@ the earlier `…_sojrqc_fmW0p5_e100_s{1,2,3}.pt` (−mx F_medial term) remain av
    reproduces the optimizer's exported foot points to millimetres (about 13 cm off with the copied angles).
 4. **Use a centred window.** The query frame k needs positions and contact flags for frames k−10 … k+9 (100 ms of
    the future). A trailing window (k−19 … k) shifts every prediction about 100 ms late.
-5. **Average the three runs.** All three share the same input normalisation, so build the inputs once:
+5. **Do not rotate your inputs.** Pass the pelvis angles and the COM / foot positions in OpenSim ground axes as before,
+   whichever way the robot walks: `predict_windowed` removes the heading itself. If you build the feature tensor
+   yourself (autodiff), apply `remove_heading_torch` first (*Getting gradients*).
+6. **Average the three runs.** All three take the same raw inputs (each normalises them with its own stored
+   statistics), so build the inputs once:
    ```python
-   paths = [f"best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s{k}.pt" for k in (1, 2, 3)]
+   paths = [f"knee_hd_s{k}.pt" for k in (1, 2, 3)]
    ms = [JCFPostureSurrogate(p) for p in paths]
    outs = [mm.predict_windowed(q16, com_w, rfoot_w, lfoot_w, mass_kg=75, height_m=1.70,
                                r_contact_window=rc_w, l_contact_window=lc_w) for mm in ms]
@@ -80,41 +95,51 @@ the earlier `…_sojrqc_fmW0p5_e100_s{1,2,3}.pt` (−mx F_medial term) remain av
    f_medial = 0.5 * np.abs(fy) - mx * 1.70 / 0.045          # right knee, medial moment = -mx
    ```
    For gradients, sum the three networks' outputs inside your autodiff graph (*Getting gradients*).
-6. **Use a relative limit, not 1.4 BW.** These models are on a different scale from the old ones and read high: on the
-   Sep 23 and Nov 14 exports they average 2.5–2.7 BW over right single stance (peaks about 3.0–3.2 BW) and exceed
-   1.4 BW in every single-stance frame. Limit, for example, the stance peak to a chosen percentage of the reference's
-   own peak (sweep −10/20/30 %).
-7. **Check your integration** on the Sep 23 export (*Validation*): you should get the numbers in the table there.
+7. **Use a relative limit, not 1.4 BW.** These models are on a different scale from the old ones: on the Sep 23,
+   Nov 14 and Nov 15 exports they average 2.0–2.4 BW over right single stance (peaks about 2.4–2.8 BW), close to
+   OpenSim with exact static optimization (1.9–2.6 BW), and exceed 1.4 BW in nearly every single-stance frame. Limit,
+   for example, the stance peak to a chosen percentage of the reference's own peak (sweep −10/20/30 %).
+8. **Check your integration** on the Sep 23 export (*Validation*): you should get the numbers in the table there.
 
 ### What they can and cannot do
 
 | | Result |
 |---|---|
-| Held-out people (one per lab, never trained on), against their OpenSim labels | stance F_medial r 0.80, mean error 0.36 BW; compression r 0.83, error 0.47 BW. Worse on labs not in training (Han 0.73, Fregly 0.76 BW) |
-| Real knees (Knee Grand Challenge implants), medial force | early-stance peak about right in size (1.78 vs 1.94 BW) but about 80 ms late; push-off peak about 2× too high (3.33 vs 1.52 BW); r 0.18–0.43 within stance |
-| Gait modifications on the implants (trunk sway, poles, medial thrust; does the predicted change follow the measured one?) | 6–7 of 10 directions right, r +0.39. The knee adduction moment (KAM) from the ground force gets 7 of 10 (r +0.51 to +0.66), OpenSim with muscle forces 10 of 10 |
-| Optimizer exports | reads the Sep 23 and Nov 14 motions almost the same (2.5–2.7 BW in stance) although they differ (knee motion, KAM about 20 % lower on Nov 14) |
+| Held-out people (one per lab, never trained on), against their OpenSim labels | stance F_medial r 0.82, mean error 0.38 BW; compression r 0.85, error 0.46 BW. Labs not in training: Han 0.42, Fregly 0.47 BW (plain: 0.80, 0.69) |
+| Real knees (Knee Grand Challenge implants), medial force | r 0.56–0.71 within stance (three-run average; OpenSim with muscle forces 0.45–0.64, plain models 0.16–0.36), mean error 0.45–0.67 BW; push-off still 1.3–2.3× the measured force (plain: 1.9–3.1×); first peak about right on SC, too high on JW and DM |
+| Gait modifications on the implants (trunk sway, poles, medial thrust; does the predicted change follow the measured one?) | 6–8 of 10 directions right, r +0.53 to +0.57. The knee adduction moment (KAM) from the ground force gets 7 of 10 (r +0.51 to +0.66), OpenSim with muscle forces 10 of 10 |
+| Optimizer exports | right-stance means 2.0–2.4 BW on Sep 23, Nov 14 and Nov 15, close to OpenSim with exact SO; misses the rise at the end of stance on the near-locked-knee exports (peaks ~2.5 BW where OpenSim reaches 4–4.9) |
 
-So they give a reasonable typical stance load but respond weakly to posture changes, which is what an antalgic
-optimization exploits. For results, constraining the KAM (computed from the optimizer's own foot wrench,
-`tools/kam_trajectory_csv.py`) is better validated; use these models as a demonstration or alongside it.
+So they track the shape of the measured medial force over stance better than OpenSim does, but still respond weakly
+to posture changes, which is what an antalgic optimization exploits. Use them to drive the optimizer; report the knee
+load of the final gaits from OpenSim with exact static optimization (`tools/score_export.py`, below), relative to the
+reference gait. Constraining the KAM (computed from the optimizer's own foot wrench, `tools/kam_trajectory_csv.py`)
+remains the better-validated choice for the direction of a modification.
 
-**Locked knee.** In the optimizer's exports so far the stance knee stays at 0° flexion (normal walking: 13–21° in
-single stance). The models never saw a loaded, fully straight knee, and OpenSim cannot label it reliably either: with
-no ligaments in the model, static optimization holds the hyperextension load with the gastrocnemius at full
-activation (`pipeline/label_trajectory_csv.py` on the Nov 14 export: 33–43 % of single-stance frames saturated). A
-reference with normal stance knee flexion makes both far more trustworthy.
+**Locked knee and foot torque.** In the Sep 23 and Nov 14 exports the stance knee stays at 0° flexion, in Nov 15 at
+about 5° (training walking data: smallest single-stance flexion median 9°, middle half 6–13°). The models never saw a
+loaded, fully straight knee, and with no ligaments in the model OpenSim holds the hyperextension with the
+gastrocnemius at full activation. The larger problem is the foot torque: the exports apply the foot force at a fixed
+point and shift the effective centre of pressure with the torque about the medio-lateral axis, and on Nov 15 that
+point runs from 6–12 cm behind the heel to ~4 cm past the toes during single stance. That gives knee moments about
+2.5× normal walking at both ends of stance. Keeping the pressure point inside the foot (heel to toe), ideally moving
+from mid-foot to the forefoot during single stance, makes both the surrogate and OpenSim far more trustworthy.
 
-**OpenSim labels for optimizer trajectories:** `pipeline/label_trajectory_csv.py` (fixed Nov 14: pelvis conversion,
-JointReaction with the muscle forces in `jcf_output_sojr/`, −mx in `labels.csv`). It needs physically plausible foot
-wrenches (no pulling, centre of pressure inside the foot, gradual weight transfer).
+**OpenSim labels and scores for optimizer trajectories:** `pipeline/label_trajectory_csv.py` (pelvis conversion,
+JointReaction with the muscle forces, −mx in `labels.csv`). Since Nov 15 it re-solves static optimization exactly
+(`analysis/thesis/so_exact.py`): OpenSim's own solver stops short of its optimum on most frames of the exports without
+reporting a failure, which shows up as fake muscle co-activation and an inflated knee load. One command labels an
+export, runs the surrogates and writes a per-stance score table and plot (~5 min):
+`python -I tools/score_export.py --csv <export>.csv --name "<name>" --folder jcf/external/<folder>`. It needs physically
+plausible foot wrenches (no pulling, centre of pressure inside the foot, gradual weight transfer).
 
 ## Files needed
 
 | File | Purpose |
 |---|---|
-| `inference_posture_surrogate.py` | Self-contained module: model class, feature construction, `JCFPostureSurrogate`, `urdf_pelvis_to_opensim`. The Nov 2026 version is needed for the corrected checkpoints and the pelvis conversion |
-| `…_fpopt_w20_t100_sojrqc_e100_s{1,2,3}.pt` | **For the gait optimizer** (see *Start here*). ~310 KB each. Not on Hugging Face yet |
+| `inference_posture_surrogate.py` | Self-contained module: model class, feature construction, `JCFPostureSurrogate`, `urdf_pelvis_to_opensim`, `remove_heading` / `remove_heading_torch`. The Nov 15 2026 version is needed for the heading-free checkpoints |
+| `knee_hd_s{1,2,3}.pt` (= `…_fpopt_w20_t100_sojrqc_hd_e100_s{1,2,3}.pt`) | **For the gait optimizer** (see *Start here*). ~320 KB each, sent directly. Not on Hugging Face yet |
+| `…_fpopt_w20_t100_sojrqc_e100_s{1,2,3}.pt` | Nov 14 plain checkpoints: corrected labels and sign, but heading-dependent inputs. Superseded |
 | `infer_trajectory_csv.py` | Runs a checkpoint on an exported trajectory CSV (*Validation*); converts the pelvis angles since Nov 2026 |
 | `runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt` | Old labels, +mx. Keep only to reproduce the ISRR-era optimizer runs |
 | `mlp-grffree-contact.pt` | Old labels, +mx (in `models/mlp-grffree-contact/`; 238-channel input, contact flags, uses pelvis translation) |
@@ -222,6 +247,22 @@ near `(0, −0.95, +0.08)` m — about a metre *below* the pelvis in y, slightly
 point, x is about 0.13 m further forward.
 The most common integration bug is skipping this step; the symptom is medial-force peaks ~3× too low.
 
+### Heading
+
+The heading-free checkpoints (`m.heading_norm` True) rotate every sample about the vertical so that its centre-frame
+pelvis faces +x; `predict_windowed` does it, so callers pass OpenSim ground axes as above. Per sample:
+
+- heading ψ of the centre frame's pelvis: with R = Rz(tilt)·Rx(list)·Ry(rotation) (OpenSim ground axes) and x its first
+  column, ψ = atan2(−x_z, x_x). This is not the `pelvis_rotation` coordinate, which OpenSim applies last;
+- one rotation Ry(−ψ) = [[cos ψ, 0, −sin ψ], [0, 1, 0], [sin ψ, 0, cos ψ]] applied to all 20 window frames of the three
+  relative vectors (COM, right foot, left foot minus pelvis);
+- the pelvis orientation rotated the same way, R' = Ry(−ψ)·R, and re-expressed as tilt = atan2(−R'01, R'11),
+  list = asin(R'21), rotation = atan2(−R'20, R'22). Leg angles, contact flags, mass and height are unchanged.
+
+It is not the identity for an export walking along +x: the pelvis heading swings a few degrees every step and is
+removed per frame. `remove_heading` (NumPy) and `remove_heading_torch` (autodiff) in `inference_posture_surrogate.py`
+implement it; training applies the same function (`train_mlp.py`, the `*_sojrqc_hd` input sets).
+
 ### Foot point
 
 Each checkpoint expects the position of one fixed point on each calcn body, stored in the checkpoint and exposed as
@@ -269,8 +310,8 @@ which is what lets the model place the push-off medial spike.
 import numpy as np
 from inference_posture_surrogate import JCFPostureSurrogate
 
-m = JCFPostureSurrogate("best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s1.pt")
-# m.include_contact -> True, m.n_features -> 235 (no pelvis translation), m.mx_medial_sign -> -1
+m = JCFPostureSurrogate("knee_hd_s1.pt")
+# m.include_contact -> True, m.n_features -> 235 (no pelvis translation), m.mx_medial_sign -> -1, m.heading_norm -> True
 
 out = m.predict_windowed(
     joint_angles       = q16,          # (16,)  center frame, order above, OpenSim frame, pelvis angles converted
@@ -387,10 +428,16 @@ f_medial = 0.5 * fy.abs() + m.mx_medial_sign * mx * height / 0.045   # +1 for pr
 f_medial.backward()
 ```
 
-For the corrected checkpoints (235 channels: `q13` = `q16` without `pelvis_tx/ty/tz`), averaged over the three runs:
+For the heading-free checkpoints (235 channels: `q13` = `q16` without `pelvis_tx/ty/tz`; `m.heading_norm` True),
+remove the heading first, then average over the three runs:
 
 ```python
-q13_t = torch.cat([q16_t[0:3], q16_t[6:16]])                  # drop pelvis_tx/ty/tz
+from inference_posture_surrogate import remove_heading_torch
+# q16_t (16,): OpenSim angles, pelvis converted; com_t, rf_t, lf_t (20, 3): relative to the pelvis, OpenSim ground axes;
+# rc_t, lc_t (20,): contact flags. Batched: add a leading N to every tensor.
+ang_t, (com_h, rf_h, lf_h) = remove_heading_torch(q16_t[0:3], com_t, rf_t, lf_t)   # one rotation per sample
+q13_t = torch.cat([ang_t, q16_t[6:16]])                       # heading-free pelvis angles, legs; no pelvis_tx/ty/tz
+window_t = torch.cat([com_h, rf_h, lf_h, rc_t[:, None], lc_t[:, None]], dim=1)       # (20, 11), frame-major
 x = torch.cat([q13_t, window_t.reshape(-1), torch.tensor([mass, height])])    # (235,)
 outs = [mm.model(((x.to(mm.device) - mm.input_mean) / mm.input_std)[None])[0] for mm in ms]   # ms: s1, s2, s3
 fy = torch.stack([o[1] for o in outs]).mean()
@@ -401,7 +448,8 @@ f_medial.backward()
 
 If the pelvis rotations enter your graph in URDF form, the conversion has to be differentiable too: port
 `urdf_pelvis_to_opensim` to torch (it is a few matrix products, `asin` and `atan2`), or treat the converted angles
-as the decision variables.
+as the decision variables. `remove_heading_torch` is already differentiable (smooth unless the pelvis x axis points
+straight up); `tests/test_heading_norm.py` checks it against the NumPy version the module uses.
 
 The contact flags are constants in the optimization (0/1 from your contact schedule), so they
 carry no gradient; everything else flows through normally. Activation is ReLU in this checkpoint
@@ -433,8 +481,8 @@ the checkpoint, `m.mx_medial_sign`:
 `tools/evaluate_fmedial.py` scores labels and raw outputs with one convention for every checkpoint
 (`--mx-convention physical`, the default; `pipeline` reproduces the pre-Nov-2026 numbers).
 
-`f_medial` is **signed**. With the corrected checkpoints it stays positive in practice: the three-run average never
-went below +0.23 BW on the Grand Challenge frames or +0.38 BW on the Sep 23 trajectory, so `|f_medial|` and
+`f_medial` is **signed**. With the heading-free checkpoints it stays positive in practice: the three-run average never
+went below +0.18 BW on the Grand Challenge frames or +0.85 BW on the Sep 23 trajectory, so `|f_medial|` and
 `max(f_medial, 0)` give the same constraint. With the old checkpoints and `+mx` it goes negative at push-off; a
 constraint on `|f_medial|` then fires on that event too.
 
@@ -445,7 +493,7 @@ q reordering, pelvis-angle conversion, contact flags from foot wrenches, windowi
 
 ```bash
 python infer_trajectory_csv.py --csv my_trajectory.csv --mass 75 --height 1.7 \
-    --ckpt best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_e100_s1.pt \
+    --ckpt knee_hd_s1.pt \
     --out-csv s1.csv
 ```
 
@@ -453,17 +501,19 @@ python infer_trajectory_csv.py --csv my_trajectory.csv --mass 75 --height 1.7 \
 `fy`, `mx`, `mx_medial`, `f_medial`; run it once per checkpoint and average `fy` and `mx` for the three-run value.
 
 **Integration check on the Sep 23 export** (`robot_q_log.csv`, 75 kg, 1.70 m). F_medial over right single stance
-(stance 1: 1.98–2.77 s, stance 2: 4.19–4.83 s), BW, for the plain-loss checkpoints `…_t100_sojrqc_e100_s{1,2,3}.pt`
-through this script (it reproduces the thesis audit's own feature path to within 1e-5 BW):
+(stance 1: 1.98–2.77 s, stance 2: 4.19–4.83 s), BW, for the heading-free checkpoints `knee_hd_s{1,2,3}.pt` through this
+script:
 
 | Checkpoint | Stance 1 mean / peak | Stance 2 mean / peak |
 |---|---|---|
-| s1 | 2.56 / 3.23 | 2.77 / 3.23 |
-| s2 | 2.50 / 3.20 | 2.68 / 3.17 |
-| s3 | 2.48 / 3.09 | 2.53 / 3.05 |
-| average of the three (`fy`, `mx` averaged) | 2.51 / 3.17 | 2.66 / 3.15 |
+| s1 | 2.58 / 3.03 | 2.77 / 3.12 |
+| s2 | 2.18 / 2.35 | 2.31 / 2.47 |
+| s3 | 2.03 / 2.53 | 2.16 / 2.76 |
+| average of the three (`fy`, `mx` averaged) | 2.27 / 2.62 | 2.41 / 2.78 |
 
-For the earlier `…_sojrqc_fmW0p5_e100_s{1,2,3}.pt` the averages are 2.22 / 2.69 and 2.32 / 2.67.
+The result must not change if you rotate the whole export about the vertical (`analysis/thesis/fig_heading_invariance.py`
+does this for six headings). For reference, the plain `…_sojrqc_e100_s{1,2,3}.pt` average 2.51 / 3.17 and 2.66 / 3.15,
+the earlier `…_sojrqc_fmW0p5_e100_s{1,2,3}.pt` 2.22 / 2.69 and 2.32 / 2.67.
 
 If your own pipeline gives different numbers on the same export, the usual causes are copied pelvis angles, the
 calcn origin instead of the optimizer's foot point, positions not rotated to OpenSim axes, or `+mx`.

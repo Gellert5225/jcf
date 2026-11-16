@@ -124,6 +124,23 @@ def test_inference_matches_training_and_is_invariant():
                 assert np.allclose(out[key], ref[key], atol=1e-4), (psi, key)
 
 
+def test_torch_version_matches_and_has_gradients():
+    import torch
+    from inference_posture_surrogate import remove_heading_torch
+    q, vec, _ = synthetic_trial(seed=3, heading_deg=-120.0)
+    win = np.stack([window_of(vec[0], k) for k in range(T)])                     # (T, 20, 3)
+    ang_np, (win_np,) = remove_heading(q[:, 0:3], win)
+    a_t = torch.tensor(q[:, 0:3], requires_grad=True)
+    w_t = torch.tensor(win, requires_grad=True)
+    ang_t, (win_t,) = remove_heading_torch(a_t, w_t)
+    assert np.allclose(ang_t.detach().numpy(), ang_np, atol=1e-10)
+    assert np.allclose(win_t.detach().numpy(), win_np, atol=1e-10)
+    (ang_t.sum() + win_t.sum()).backward()
+    assert torch.isfinite(a_t.grad).all() and torch.isfinite(w_t.grad).all() and a_t.grad.abs().sum() > 0
+    a1, (v1,) = remove_heading_torch(a_t[5].detach(), w_t[5].detach())           # single sample: (3,), (20, 3)
+    assert np.allclose(v1.numpy(), win_np[5], atol=1e-10) and np.allclose(a1.numpy(), ang_np[5], atol=1e-10)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

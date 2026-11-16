@@ -240,6 +240,36 @@ def remove_heading(pelvis_ang, *vectors):
     return ang, out
 
 
+def _rot_torch(axis, ang):
+    """torch version of _rot: (..., 3, 3) rotations about coordinate axis 0/1/2, differentiable."""
+    c, s = torch.cos(ang), torch.sin(ang)
+    o, z = torch.ones_like(ang), torch.zeros_like(ang)
+    rows = {0: [[o, z, z], [z, c, -s], [z, s, c]],
+            1: [[c, z, s], [z, o, z], [-s, z, c]],
+            2: [[c, -s, z], [s, c, z], [z, z, o]]}[axis]
+    return torch.stack([torch.stack(r, dim=-1) for r in rows], dim=-2)
+
+
+def remove_heading_torch(pelvis_ang, *vectors):
+    """Differentiable torch version of remove_heading, for building the *_hd features inside an autodiff graph
+    (*Getting gradients* in docs/INFERENCE_GUIDE_MLP.md). pelvis_ang (..., 3) OpenSim [tilt, list, rotation] (rad) of
+    the centre frame; vectors (..., W, 3) or (..., 3) in OpenSim ground axes with the same leading shape.
+    Returns (pelvis angles with heading 0, [rotated vectors]). Smooth unless the pelvis x axis points straight up."""
+    a = pelvis_ang
+    R = _rot_torch(2, a[..., 0]) @ _rot_torch(0, a[..., 1]) @ _rot_torch(1, a[..., 2])
+    Rm = _rot_torch(1, -torch.atan2(-R[..., 2, 0], R[..., 0, 0]))       # undo the heading of the pelvis x axis
+    R2 = Rm @ R
+    ang = torch.stack([torch.atan2(-R2[..., 0, 1], R2[..., 1, 1]),
+                       torch.asin(torch.clamp(R2[..., 2, 1], -1.0, 1.0)),
+                       torch.atan2(-R2[..., 2, 0], R2[..., 2, 2])], dim=-1)
+    out = []
+    for v in vectors:
+        extra = v.dim() - (Rm.dim() - 2) - 1                            # window axes between the batch and xyz
+        Rb = Rm.reshape(Rm.shape[:-2] + (1,) * extra + (3, 3))
+        out.append((Rb @ v.unsqueeze(-1)).squeeze(-1))
+    return ang, out
+
+
 class JCFPostureSurrogate:
     """
     Loads the (q_inst, windowed positions, mass, height) MLP surrogate.
