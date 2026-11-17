@@ -306,6 +306,8 @@ class JCFPostureSurrogate:
         # as the two above with the heading removed per sample (remove_heading; done here, callers pass lab axes)
         "qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc_hd",
         "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_sojrqc_hd",
+        # heading-free, trained on the JointReaction labels without muscle forces (jcf_output/), same QC frames
+        "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_jrqc_hd",
     )
     LEGACY_MX_MEDIAL_SIGN = 1.0   # checkpoints without "mx_medial_sign" (all before Nov 2026)
 

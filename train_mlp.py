@@ -372,6 +372,20 @@ for _base in ("qinst_notrans_pelvisrel_winpos_contact_w20_t100_sojrqc",
                                           "(centre-frame pelvis faces +x)")
 
 
+# No-muscle counterpart of the heading-free sets (Nov 2026): the labels JointReaction gives without the SO muscle forces
+# (jcf_output/, the label source of every checkpoint before Nov 2026, ISRR 2026 included), everything else as the
+# *_sojrqc_hd set: exact timing at 100 Hz, heading removed, physical M_x sign stored for inference, and the same QC
+# frame mask, read from jcf_output_sojr/label_mask.npz (the two JR files share their time grid), so the two families
+# train on the same frames. Train with --flat-labels jcf_output_sojr for the same trials too.
+NO_MUSCLE_HD_SET = "qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100_jrqc_hd"
+INPUT_SETS[NO_MUSCLE_HD_SET] = dict(
+    INPUT_SETS["qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100"], mx_medial_sign=MX_SIGN_PHYSICAL,
+    label_mask=LABEL_MASK_FILE, label_mask_subdir=SOJR_LABEL_SUBDIR, heading_norm=True,
+    desc=INPUT_SETS["qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_t100"]["desc"]
+    + f", labels without muscle forces ({DEFAULT_LABEL_SUBDIR}/), physical M_x sign, QC frame mask from "
+      f"{SOJR_LABEL_SUBDIR}/{LABEL_MASK_FILE}, heading removed per sample")
+
+
 def fmedial_term(fy, mx, height_m, mx_sign, alpha=0.5, d_m=0.045):
     """F_medial = alpha*|F_y| + mx_sign*M_x*H/d_m (BW) from F_y (BW) and the raw right-knee M_x (BW*H); torch tensors
     or numpy arrays. The F_medial loss term of train() and inference_posture_surrogate's f_medial."""
@@ -979,17 +993,19 @@ def _partial_labels_error(where, missing, n_stored, label_subdir):
         f"{label_subdir}/ labels.")
 
 
-def _missing_mask_error(where, missing, n, label_subdir, label_mask):
-    """SystemExit for labelled folders without the label-QC mask of a *_sojrqc set."""
+def _missing_mask_error(where, missing, n, label_subdir, label_mask, mask_subdir=None):
+    """SystemExit for labelled folders without the label-QC mask of a *_sojrqc set (mask_subdir: the folder the mask
+    is read from when it is not the label folder, cfg["label_mask_subdir"])."""
     return SystemExit(
-        f"{where}: {len(missing)} of {n} folders with {label_subdir}/ labels have no {label_subdir}/{label_mask} "
+        f"{where}: {len(missing)} of {n} folders with {label_subdir}/ labels have no "
+        f"{mask_subdir or label_subdir}/{label_mask} "
         f"({_by_lab(missing)}; e.g. {os.path.basename(missing[0].rstrip('/'))}). This input set trains only on frames "
         f"that pass the label QC; write the masks first: python -I analysis/thesis/so_label_qc.py masks --workers 20")
 
 
 def _find_trials(data_root, dataset=None, exclude=None, label_subdir=DEFAULT_LABEL_SUBDIR,
                  flat_filter=False, flat_cv=FLAT_CV, flat_dr=FLAT_DR, flat_label_subdir=None,
-                 allow_partial_labels=True, label_mask=None):
+                 allow_partial_labels=True, label_mask=None, label_mask_subdir=None):
     """Labelled trial folders, without those whose labels hold a non-finite value, then (flat_filter) without those
     whose label waveform is flat.
 
@@ -1016,9 +1032,9 @@ def _find_trials(data_root, dataset=None, exclude=None, label_subdir=DEFAULT_LAB
         bad = set(nonfinite)
         dirs = [d for d in dirs if d not in bad]
     if label_mask:
-        no_mask = [d for d in dirs if not os.path.exists(os.path.join(d, label_subdir, label_mask))]
+        no_mask = [d for d in dirs if not os.path.exists(os.path.join(d, label_mask_subdir or label_subdir, label_mask))]
         if no_mask:
-            raise _missing_mask_error(data_root, no_mask, len(dirs), label_subdir, label_mask)
+            raise _missing_mask_error(data_root, no_mask, len(dirs), label_subdir, label_mask, label_mask_subdir)
     flat_sub = flat_label_subdir or label_subdir
     n_flat = 0
     if flat_filter:
@@ -1043,7 +1059,8 @@ def _label_config(input_set, max_peak_bw, max_moment_bwh, flat_filter, flat_cv, 
                 flat_cv=float(flat_cv) if flat_filter else None, flat_dr=float(flat_dr) if flat_filter else None,
                 flat_label_subdir=(flat_label_subdir or sub) if flat_filter else None,
                 nonfinite_rejected=True, allow_partial_labels=bool(allow_partial_labels),
-                label_mask=mask,                  # frame mask file in label_subdir/ (None: every frame is a target)
+                label_mask=mask,                  # frame mask file (None: every frame is a target)
+                label_mask_subdir=(cfg.get("label_mask_subdir") or sub) if mask else None,   # folder it is read from
                 label_mask_key=cfg.get("label_mask_key", LABEL_MASK_KEY) if mask else None,
                 label_mask_tol=float(cfg.get("label_mask_tol", LABEL_MASK_TOL)) if mask else None)
 
@@ -1085,7 +1102,8 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
           max_peak_bw=None, seed=SEED, input_set='full', dq_method='central',
           epochs=None, lr_patience=None, fmedial_weight=0.0, activation='relu',
           dropout=None, init_seed=None, max_moment_bwh=None, flat_cv=FLAT_CV, flat_dr=FLAT_DR,
-          flat_label_subdir=None, allow_partial_labels=False, mx_sign_override=None, fmedial_loss="combined"):
+          flat_label_subdir=None, allow_partial_labels=False, mx_sign_override=None, fmedial_loss="combined",
+          output_loss="all"):
     """
     Train MLP on per-frame data from one or both activities.
       activity='static':  ./jcf/full_duration/training/static/  (for posture optimization)
@@ -1112,6 +1130,10 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
       fmedial_loss: 'combined' (default) = MSE of F_medial = 0.5|F_y| + s*M_x*H/d; 'signfree' = the same expansion
       without the sign-carrying cross term, 0.25*(|F_y| - |F_y_true|)^2 + ((M_x - M_x_true)*H/d)^2, i.e. per-output
       errors with M_x weighted at the scale it enters F_medial (weight fmedial_weight; file name gets _sf).
+      output_loss: 'all' (default) = squared error of all four outputs in their own units (F in BW, M_x in BW*H; M_x
+      errors are ~100x smaller than F_y's, so M_x barely enters) + the magnitude-weighted force term; 'fymx' = only
+      F_y and M_x, each at the scale it enters F_medial: (0.5*(F_y - F_y_true))^2 + ((M_x - M_x_true)*H/d)^2. F_x and
+      F_z get no loss (their outputs are meaningless). File name gets _fymx.
     """
     _call_args = dict(locals())          # every train() argument, defaults included (provenance)
     filters_given = (max_peak_bw is not None, max_moment_bwh is not None)
@@ -1132,6 +1154,14 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
     mx_sign = mx_medial_sign_of(INPUT_SETS[input_set])
     if fmedial_loss not in ("combined", "signfree"):
         raise ValueError("fmedial_loss must be 'combined' or 'signfree'")
+    if output_loss not in ("all", "fymx"):
+        raise ValueError("output_loss must be 'all' or 'fymx'")
+    if output_loss == "fymx":
+        if fmedial_weight > 0:
+            raise ValueError("output_loss='fymx' replaces the per-output loss; do not combine it with --fmedial-weight")
+        if not INPUT_SETS[input_set].get("include_height", False):
+            raise ValueError("output_loss='fymx' needs an input set with include_height=True (M_x*H/d)")
+        print("Output loss: F_y and M_x only, (0.5*(F_y-F_y_true))^2 + ((M_x-M_x_true)*H/0.045)^2; F_x, F_z untrained")
     mx_sign_suffix = ""
     if mx_sign_override is not None:
         if mx_sign_override not in MX_CONVENTIONS:
@@ -1146,7 +1176,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
           f"{max_peak_bw:g} BW, |M_x| <= {max_moment_bwh:g} BW*H, non-finite labels dropped, "
           + (f"flat filter on walking (drop CV < {flat_cv:g} or range < {flat_dr:g} BW of the "
              f"{label_cfg['flat_label_subdir']}/ labels)" if apply_flat_filter else "no flat filter")
-          + (f"; frame mask {label_subdir}/{label_mask} ({label_cfg['label_mask_key']}, tol "
+          + (f"; frame mask {label_cfg['label_mask_subdir']}/{label_mask} ({label_cfg['label_mask_key']}, tol "
              f"{label_cfg['label_mask_tol']:g})" if label_mask else ""))
     if label_mask:
         off = (max_peak_bw >= MASKED_MAX_PEAK_BW, max_moment_bwh >= MASKED_MAX_MOMENT_BWH)
@@ -1183,10 +1213,11 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                   f"(e.g. {nolab[0]})")
         if label_mask:
             lab_dirs = [d for d in (ds_dirs or []) if os.path.isdir(d) and d not in nolab]
-            no_mask = [d for d in lab_dirs if not os.path.exists(os.path.join(d, label_subdir, label_mask))]
+            msub = label_cfg["label_mask_subdir"]
+            no_mask = [d for d in lab_dirs if not os.path.exists(os.path.join(d, msub, label_mask))]
             if no_mask:
                 raise _missing_mask_error(f"--{'extra-dirs' if kind == 'external' else 'extra-val-dirs'}", no_mask,
-                                          len(lab_dirs), label_subdir, label_mask)
+                                          len(lab_dirs), label_subdir, label_mask, msub)
 
     # Collect train/val dirs per activity
     train_dirs_by = {}
@@ -1203,7 +1234,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
         dirs, scan = _find_trials(root, dataset=dataset, exclude=exclude, label_subdir=label_subdir,
                                   flat_filter=flat_here, flat_cv=flat_cv, flat_dr=flat_dr,
                                   flat_label_subdir=flat_label_subdir, allow_partial_labels=allow_partial_labels,
-                                  label_mask=label_mask)
+                                  label_mask=label_mask, label_mask_subdir=label_cfg["label_mask_subdir"])
         n0 = scan["n_found"]
         print(f"[{act}] found {n0} subject directories with {label_subdir}/ labels")
         if scan["missing"]:
@@ -1398,12 +1429,18 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
             f"--fmedial-weight requires input_set with include_height=True; "
             f"got input_set='{input_set}'."
         )
-    height_mean_t = inp_mean[-1].to(DEVICE).float() if fmedial_weight > 0 else None
-    height_std_t = inp_std[-1].to(DEVICE).float() if fmedial_weight > 0 else None
+    need_h = fmedial_weight > 0 or output_loss == "fymx"
+    height_mean_t = inp_mean[-1].to(DEVICE).float() if need_h else None
+    height_std_t = inp_std[-1].to(DEVICE).float() if need_h else None
     ALPHA_FMEDIAL = 0.5
     D_M_FMEDIAL = 0.045
 
     def loss_fn(pred, target, inp=None):
+        if output_loss == "fymx":
+            # F_y and M_x only, each at its scale in F_medial = 0.5|F_y| + s*M_x*H/d (height per sample, last channel)
+            H = inp[:, -1] * height_std_t + height_mean_t
+            return ((ALPHA_FMEDIAL * (pred[:, 1] - target[:, 1])) ** 2
+                    + ((pred[:, 3] - target[:, 3]) * H / D_M_FMEDIAL) ** 2).mean()
         # Plain MSE + magnitude-weighted force MSE.
         # No gradient term — single-frame model has no temporal axis.
         mse = ((pred - target) ** 2).mean()
@@ -1487,6 +1524,8 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 suffix += f"_fmW{w}" + ("_sf" if fmedial_loss == "signfree" else "")
             if activation != 'relu':
                 suffix += f"_{activation}"
+            if output_loss == "fymx":
+                suffix += "_fymx"
             suffix += mx_sign_suffix
             if tag:
                 suffix += f"_{tag}"
@@ -1507,6 +1546,7 @@ def train(activity='static', filter_flat=True, dataset=None, exclude=None,
                 "dq_method": dq_method,
                 "fmedial_weight": fmedial_weight,
                 "fmedial_loss": fmedial_loss,
+                "output_loss": output_loss,
                 "activation": activation,
                 "base_indices": INPUT_SETS[input_set]["base_indices"],
                 "include_height": INPUT_SETS[input_set]["include_height"],
@@ -1628,6 +1668,10 @@ if __name__ == "__main__":
                    help="combined: MSE of F_medial = 0.5|F_y| + s*M_x*H/d (default). signfree: "
                         "0.25*(|F_y|-|F_y_true|)^2 + ((M_x-M_x_true)*H/d)^2, the same terms without the sign-carrying "
                         "cross term (file name gets _sf).")
+    p.add_argument("--output-loss", choices=["all", "fymx"], default="all",
+                   help="all: squared error of the four outputs in their own units + magnitude-weighted force term "
+                        "(default). fymx: only F_y and M_x, each at its scale in F_medial: (0.5*dF_y)^2 + (dM_x*H/d)^2 "
+                        "(file name gets _fymx; F_x, F_z untrained).")
     p.add_argument("--mx-sign", choices=sorted(MX_CONVENTIONS), default=None,
                    help="Moment sign in the F_medial loss term, overriding the input set's: physical = -mx (the "
                         "medial moment at walker_knee_r), pipeline = +mx (ISRR 2026). For sign ablations; a run whose "
@@ -1650,4 +1694,5 @@ if __name__ == "__main__":
           dropout=args.dropout,
           init_from=args.init_from, extra_dirs=args.extra_dirs,
           extra_weight=args.extra_weight, extra_val_dirs=args.extra_val_dirs,
-          lr=args.lr, tag=args.tag, mx_sign_override=args.mx_sign, fmedial_loss=args.fmedial_loss)
+          lr=args.lr, tag=args.tag, mx_sign_override=args.mx_sign, fmedial_loss=args.fmedial_loss,
+          output_loss=args.output_loss)

@@ -139,6 +139,7 @@ plausible foot wrenches (no pulling, centre of pressure inside the foot, gradual
 |---|---|
 | `inference_posture_surrogate.py` | Self-contained module: model class, feature construction, `JCFPostureSurrogate`, `urdf_pelvis_to_opensim`, `remove_heading` / `remove_heading_torch`. The Nov 15 2026 version is needed for the heading-free checkpoints |
 | `knee_hd_s{1,2,3}.pt` (= `…_fpopt_w20_t100_sojrqc_hd_e100_s{1,2,3}.pt`) | **For the gait optimizer** (see *Start here*). ~320 KB each, sent directly. Not on Hugging Face yet |
+| `knee_nomus_hd_s{1,2,3}.pt` (= `…_fpopt_w20_t100_jrqc_hd_e100_s{1,2,3}.pt`) | Same as `knee_hd` (inputs, frames, seeds, heading removal, −mx) but trained on the JointReaction labels **without** muscle forces, the label kind of every model before Nov 2026. Reads ~3× below the implants' medial force, tracks it worse (r 0.40–0.78) and does not learn the moment (r 0.04 against its own labels). Only for continuity with the ISRR-era scale |
 | `…_fpopt_w20_t100_sojrqc_e100_s{1,2,3}.pt` | Nov 14 plain checkpoints: corrected labels and sign, but heading-dependent inputs. Superseded |
 | `infer_trajectory_csv.py` | Runs a checkpoint on an exported trajectory CSV (*Validation*); converts the pelvis angles since Nov 2026 |
 | `runs/mlp/best_model_mlp_walking_qinst_notrans_pelvisrel_winpos_contact_fpopt_w20_fmW0p5_e100.pt` | Old labels, +mx. Keep only to reproduce the ISRR-era optimizer runs |

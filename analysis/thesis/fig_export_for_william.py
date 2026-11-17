@@ -52,12 +52,17 @@ def main():
     ap.add_argument("--new-pattern", default=PLAIN, help="checkpoint pattern of the new model, {} = seed 1-3 "
                     "(default: the plain models; the heading-free ones end in _sojrqc_hd_e100_s{}.pt)")
     ap.add_argument("--new-name", default="new model", help="legend name of the new model")
+    ap.add_argument("--new-desc", default="muscle forces, correct sign", help="what the new model was trained on "
+                    "(title and legend)")
     ap.add_argument("--gc-note", default="On the Grand Challenge implants the new model reads ~2x high at push-off and "
                     "its loading peak comes ~80 ms late.", help="last footnote line: the new model on the implants")
     ap.add_argument("--out", default=os.path.join(REPO, "results", "thesis", "exports"))
     a = ap.parse_args()
     exact = "exact" in a.opensim_subdir
-    osim_name = "OpenSim, SO solved exactly" if exact else "OpenSim with muscle forces"
+    no_muscle = a.opensim_subdir.rstrip("/") == "jcf_output"     # the one-pass JointReaction, no SO muscle forces
+    osim_name = ("OpenSim, SO solved exactly" if exact else
+                 "OpenSim without muscle forces" if no_muscle else "OpenSim with muscle forces")
+    osim_short = "OpenSim exact SO" if exact else "OpenSim no muscles" if no_muscle else "OpenSim with muscles"
     os.chdir(REPO)
     os.makedirs(a.out, exist_ok=True)
     H = a.height
@@ -118,7 +123,7 @@ def main():
         ax.plot(pf.t, np.clip(g, 0, 3.8), color="#b9b7b0", lw=3.0, zorder=2,
                 label="OpenSim with muscle forces, -Mx (fails the label QC; clipped at 3.8)")
     for i, f in enumerate(seeds):
-        ax.plot(t, f, color=SEED, lw=1.0, zorder=3, label=f"{a.new_name}, 3 training runs (muscle forces, -Mx)" if i == 0 else None)
+        ax.plot(t, f, color=SEED, lw=1.0, zorder=3, label=f"{a.new_name}, 3 training runs ({a.new_desc})" if i == 0 else None)
     ax.plot(t, mean, color=BLUE, lw=2.6, zorder=6, label=f"{a.new_name}, mean of 3")
     ax.plot(t, cur_plus, color=INK, lw=1.8, ls=(0, (5, 2)), zorder=5, label="your current model (fpopt_w20_fmW0p5), +Mx as in ISRR")
     ax.plot(t, cur_minus, color=ORANGE, lw=1.8, zorder=4, label="your current model, correct sign (-Mx)")
@@ -133,7 +138,7 @@ def main():
         osim_txt = ""
         if osim_rows is not None:
             mo = (osim_rows[0] >= lo - 1e-9) & (osim_rows[0] <= hi + 1e-9)
-            osim_txt = f", {'OpenSim exact SO' if exact else 'OpenSim with muscles'} {osim_rows[1][mo].mean():.2f} (peak {osim_rows[1][mo].max():.2f})"
+            osim_txt = f", {osim_short} {osim_rows[1][mo].mean():.2f} (peak {osim_rows[1][mo].max():.2f})"
             if osim_rows[2] is not None:
                 osim_txt += f" ({np.mean(osim_rows[2][mo]):.0%} pass the solver checks)"
         rows.append(f"stance {n} ({lo:.2f}-{hi:.2f} s): new {mean[m].mean():.2f} (runs "
@@ -146,12 +151,14 @@ def main():
             f"contact from the exported foot wrenches; {a.mass:g} kg, {H:g} m.\n" +
             (("OpenSim with SO solved exactly: the label pipeline with its optimizer fixed (the models were trained on "
               "OpenSim's own SO, which stops short of its optimum on many frames). Not measured ground truth.\n" if exact else
+              "OpenSim without muscle forces (JointReaction without the SO muscle forces): the label kind of every model "
+              "before Nov 2026. Not measured ground truth.\n" if no_muscle else
               "OpenSim with muscle forces is the label pipeline the new model was trained on, not measured ground truth: on "
               "the Grand Challenge implants it reads ~2x high at push-off.\n") if osim_rows is not None else
              "No ground truth on this motion. ") +
             a.gc_note,
             transform=ax.transAxes, ha="left", va="top", fontsize=8.6, color=SECOND, linespacing=1.5)
-    ax.set_title(f"{a.name}: {a.new_name} (muscle forces, correct sign) vs your current model "
+    ax.set_title(f"{a.name}: {a.new_name} ({a.new_desc}) vs your current model "
                  f"(grey = right single stance, dashed = 1.4 BW)", fontsize=10.5)
     out = os.path.join(a.out, f"fig_{tag}_for_william{a.suffix}.png")
     fig.savefig(out)
